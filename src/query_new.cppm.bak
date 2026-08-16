@@ -1,0 +1,203 @@
+module;
+#include <vector>
+#include <tuple>
+#include <utility>
+#include <type_traits>
+#include <cassert>
+
+export module elysia.query;
+
+import elysia.config;
+import elysia.meta;
+import elysia.storage;
+import elysia.bitset;
+import elysia.core; // 假设 ComponentRegistry 在这里
+
+export namespace elysia {
+
+// =============================================================================
+// 🌸 C++20 Concepts: 严格的门神
+// =============================================================================
+
+// 定义：什么是有效的组件？
+template<typename T>
+concept ComponentType = !std::is_empty_v<T>; // 简化定义，实际可加更多约束
+
+// 定义：什么是资源句柄？
+template<typename T>
+concept ResourceType = is_res_handle_v<T>;
+
+// 定义：什么是“数据参数”？(需要传递给 lambda 的参数)
+// 即：不是 With/Without 标签，也不是资源
+template<typename T>
+concept QueryDataArg = !is_with_v<T> && !is_without_v<T> && !is_res_handle_v<T>;
+
+// 定义：什么是合法的 Query 模板参数？
+// 必须是组件、标签、资源，或者被 With/Without 包裹
+template<typename T>
+concept ValidQueryArg = 
+    ComponentType<GetRawT<T>> || 
+    std::is_empty_v<GetRawT<T>> || 
+    ResourceType<T> ||
+    is_with_v<T> || 
+    is_without_v<T>;
+
+// =============================================================================
+// [Query] The C++20 Magic Implementation
+// =============================================================================
+
+struct QueryBase {
+    virtual ~QueryBase() = default;
+    virtual void prepare(ComponentRegistry& reg) = 0;
+    virtual void update_archetype(Archetype<DefaultConfig>* arch) = 0;
+};
+
+// 🌟 Concept 守门：Args 必须合法，否则编译期报错
+template<ValidQueryArg... Args>
+class Query : public QueryBase {
+public:
+    // 🌸 编译期过滤：只保留真正的数据类型，生成一个新的 Tuple 类型
+    // 例如：Query<Pos, With<Tag>, Vel> -> DataTuple<Pos, Vel>
+    using DataTuple = decltype(std::tuple_cat(
+        std::conditional_t<QueryDataArg<Args>, std::tuple<GetRawT<Args>>, std::tuple<>>{}...
+    ));
+    
+    // 同样过滤出资源类型
+    using ResTuple = decltype(std::tuple_cat(
+        std::conditional_t<ResourceType<Args>, std::tuple<typename Args::type>, std::tuple<>>{}...
+    ));
+
+    static constexpr size_t DataCount = std::tuple_size_v<DataTuple>;
+
+    // =========================================================
+    // 1. Prepare: 使用 type_identity + Fold Expression 替代递归
+    // =========================================================
+    void prepare(ComponentRegistry& reg) override {
+        with_mask_.clear();
+        without_mask_.clear();
+
+        // 🌟 魔法核心：(lambda(identity), ...) 折叠表达式
+        ([&]<typename T>(std::type_identity<T>) {
+            // 跳过资源
+            if constexpr (ResourceType<T>) return;
+
+            using Raw = GetRawT<T>;
+            uint32_t id = reg.ensure_registered<Raw>();
+
+            if constexpr (is_without_v<T>) {
+                without_mask_.set(id);
+            } else {
+                // With<T> 或普通 T (Read/Write) 都需要存在
+                with_mask_.set(id);
+            }
+        }(std::type_identity<Args>{}), ...);
+
+        // 重置缓存
+        archetypes_.clear();
+        column_indices_.clear();
+    }
+
+    // =========================================================
+    // 2. Update Archetype: 缓存匹配的 Archetype 和列索引
+    // =========================================================
+    void update_archetype(Archetype<DefaultConfig>* arch) override {
+        // 1. 快速位掩码检查
+        if (!match_all(arch->bit_sig(), with_mask_)) return;
+        if (intersects(arch->bit_sig(), without_mask_)) return;
+        
+        // 2. 查重
+        for(auto* existing : archetypes_) if(existing == arch) return;
+
+        // 3. 解析列索引 (只解析 DataTuple 需要的列)
+        std::vector<size_t> indices;
+        indices.reserve(DataCount);
+        bool all_found = true;
+
+        // 再次使用 type_identity + Fold Expression
+        // 这次是遍历 DataTuple 里的类型
+        if constexpr (DataCount > 0) {
+            parse_indices<DataTuple>(arch, indices, all_found, std::make_index_sequence<DataCount>{});
+        }
+
+        if (all_found) {
+            archetypes_.push_back(arch);
+            column_indices_.push_back(std::move(indices));
+        }
+    }
+
+    // =========================================================
+    // 3. Each: 极速迭代器 (Pointer Hoisting + Direct Expansion)
+    // =========================================================
+    template<typename Func>
+    void each(Func&& func) {
+        // 生成资源引用 Tuple (这里简化处理，假设 Res 从 World 获取)
+        // 实际上你可能需要把 World* 传进来
+        // auto res_tuple = ...; 
+
+        // 遍历所有缓存的 Archetype
+        for (size_t a = 0; a < archetypes_.size(); ++a) {
+            auto* arch = archetypes_[a];
+            const auto& cols = column_indices_[a]; // 当前 Archetype 对应的列索引数组
+            
+            for (auto& chunk : arch->table().chunks()) {
+                const size_t count = chunk->count();
+
+                // 🌟 核心优化：Pointer Hoisting (指针提升)
+                // 在进入最内层循环前，把 DataTuple 里所有类型的指针一次性拿到
+                auto ptrs = get_pointers(chunk.get(), cols, std::make_index_sequence<DataCount>{});
+
+                // 🌟 核心循环：Direct Expansion (直接展开)
+                for (size_t i = 0; i < count; ++i) {
+                    // C++20 允许我们在 lambda 内部直接解包 tuple 并调用 func
+                    // 编译后等价于 func(ptr0[i], ptr1[i], ...)
+                    std::apply([&](auto*... raw_ptrs) {
+                        func(raw_ptrs[i]...); 
+                    }, ptrs);
+                }
+            }
+        }
+    }
+
+private:
+    // 辅助：解析列索引
+    template<typename Tuple, size_t... Is>
+    void parse_indices(Archetype<DefaultConfig>* arch, std::vector<size_t>& out, bool& ok, std::index_sequence<Is...>) {
+        // Fold Expression
+        ((ok = ok && [&](){
+            using T = std::tuple_element_t<Is, Tuple>;
+            // 获取 Component ID (假设 TypeTraits 有这个能力)
+            // 注意：这里需要去 const/ref
+            using RawT = std::remove_const_t<std::remove_reference_t<T>>; 
+            auto idx = arch->get_column_index(TypeTraits<RawT>::id);
+            if (idx) out.push_back(*idx);
+            return idx.has_value();
+        }()), ...);
+    }
+
+    // 辅助：获取裸指针 Tuple
+    template<size_t... Is>
+    auto get_pointers(auto* chunk, const std::vector<size_t>& cols, std::index_sequence<Is...>) {
+        return std::make_tuple(
+            static_cast<std::tuple_element_t<Is, DataTuple>*>(
+                chunk->component(cols[Is], 0) // 获取第 Is 个数据类型对应的列指针
+            )...
+        );
+    }
+
+    SignatureBuffer<> with_mask_;
+    SignatureBuffer<> without_mask_;
+    std::vector<Archetype<DefaultConfig>*> archetypes_;
+    std::vector<std::vector<size_t>> column_indices_; // 这里的 indices 仅对应 DataTuple 的顺序
+};
+
+// 🍬 语法糖：自动推导
+template<typename Func>
+auto make_query(Func&&) {
+    // 需要一个萃取器从 Func 提取参数类型
+    using Args = args_tuple_t<std::remove_reference_t<Func>>; 
+    return []<typename... Ts>(std::type_identity<std::tuple<Ts...>>) { 
+        return Query<Ts...>{}; 
+    }(std::type_identity<Args>{});
+}
+
+} // namespace elysia

@@ -1,0 +1,3 @@
+[submodule "thirdparty/ForkUnion"]
+	path = thirdparty/ForkUnion
+	url = https://github.com/ashvardanian/ForkUnion
