@@ -33,7 +33,7 @@ struct SysExecutor {
 
 using RunClosure = std::function<Result<void>(World*, void*, void*)>;
 struct SysFactory {
-    std::function<RunClosure(World*)> func;
+    std::function<RunClosure(World*, std::shared_ptr<void>& query)> func;
 };
 
 struct SysStatus {

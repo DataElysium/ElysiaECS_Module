@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <vector>
+#include <thread>
 
 import elysia;
 
@@ -85,4 +86,24 @@ TEST(ElysiaApp, MultipleObservers) {
 
     EXPECT_EQ(count_a, 1);
     EXPECT_EQ(count_b, 1);
+}
+
+TEST(ElysiaApp, KeepsRuntimeWhenChangingExecutors) {
+    App app;
+    int observed = 0;
+    std::thread::id last_thread;
+    app.system("Stateful").run([&, calls = 0](World*) mutable {
+        observed = ++calls;
+        last_thread = std::this_thread::get_id();
+    }).build();
+    app.init_serial();
+    app.update();
+    EXPECT_EQ(observed, 1);
+    app.init_parallel();
+    app.update();
+    EXPECT_EQ(observed, 2);
+    app.init_serial();
+    app.update();
+    EXPECT_EQ(observed, 3);
+    EXPECT_EQ(last_thread, std::this_thread::get_id());
 }

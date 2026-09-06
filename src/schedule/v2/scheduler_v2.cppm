@@ -4,6 +4,7 @@ module;
 #include <functional>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -51,6 +52,7 @@ public:
     return *this;
   }
 
+  // Callable registrations transfer once; run<T>() remains reusable.
   template <typename Func> SystemBuilder &run(Func &&f);
   template <typename T> SystemBuilder &run();
 
@@ -68,6 +70,8 @@ private:
   std::string name_;
   elysia::Scheduler *default_target_;
   Deps deps_;
+  bool single_use_ = false;
+  bool consumed_ = false;
   ThreadingModel threading_ = ThreadingModel::Parallel;
   SpecialSystemKind kind_ = SpecialSystemKind::None;
   std::function<void(elysia::Scheduler *, entity_t, Deps)> build_action_;
@@ -79,6 +83,47 @@ struct PhaseProxy {
   template <typename Func> entity_t add(const std::string &name, Func &&f);
 };
 } // namespace schedule
+
+// A snapshot of definitions with independent runtime state. The world must
+// outlive it. Executors may share it sequentially; concurrent runs need separate runtimes.
+class ELYSIA_API ScheduleRuntime {
+public:
+  ScheduleRuntime() = default;
+  ScheduleRuntime(const ScheduleRuntime&) = delete;
+  ScheduleRuntime& operator=(const ScheduleRuntime&) = delete;
+private:
+  World& meta_world() { return meta_world_; }
+  friend class Scheduler;
+  friend class SerialExecutor;
+  friend class TaskflowExecutor;
+  friend class ForkUnionExecutor;
+
+  // Runtime queries and captures belong to one world, which must outlive us.
+  void initialize(World* world) {
+    if (!world) throw std::invalid_argument("Schedule runtime requires a world");
+    if (bound_world_ && bound_world_ != world)
+      throw std::logic_error("Schedule runtime is already bound to another world");
+    bound_world_ = world;
+    meta_world_.query<schedule::SysFactory, schedule::SysExecutor,
+                      schedule::SysStatus, schedule::SysQuery>().each([&](auto& factory, auto& exec, auto& status, auto& query) {
+      if (!status.initialized) {
+        exec.func = factory.func(world, query.ptr);
+        status.initialized = true;
+      }
+    });
+    // Prepare query caches and command buffers before parallel dispatch.
+    meta_world_.query<schedule::SysQuery>().each([&](auto& query) {
+      if (query.ptr) world->update_query(*static_cast<QueryState*>(query.ptr.get()));
+    });
+    meta_world_.query<schedule::SysCmdBuf>().each([&](auto& cmd) {
+      if (!cmd.ptr) cmd.ptr = std::make_shared<CommandBuffer>(&world->index());
+      else cmd.ptr->set_index(&world->index());
+    });
+  }
+
+  World* bound_world_ = nullptr;
+  World meta_world_;
+};
 
 class ELYSIA_API Scheduler {
 public:
@@ -160,10 +205,47 @@ public:
       view.add(schedule::DependsOn{{target}});
   }
 
+  // Snapshot construction is serialized with scheduler edits. Existing runtimes
+  // retain their definitions and may run while the scheduler is edited.
+  std::shared_ptr<ScheduleRuntime> instantiate(World& world) {
+    auto runtime = snapshot();
+    runtime->initialize(&world);
+    return runtime;
+  }
+
   void build() {}
   World &meta_world() { return meta_world_; }
 
 private:
+  friend class SerialExecutor;
+  friend class TaskflowExecutor;
+  friend class ForkUnionExecutor;
+
+  std::shared_ptr<ScheduleRuntime> snapshot() {
+    auto runtime = std::make_shared<ScheduleRuntime>();
+    meta_world_.query<Entity>().each([&](Entity e) {
+      runtime->meta_world_.spawn_at(e).unwrap();
+      auto destination = runtime->meta_world_.entity(e);
+      auto copy = [&]<typename T>() {
+        if (auto* value = meta_world_.get_component<T>(e)) destination.add(*value);
+      };
+      copy.template operator()<schedule::SysName>();
+      copy.template operator()<schedule::SystemTag>();
+      copy.template operator()<schedule::SetTag>();
+      copy.template operator()<schedule::ApplyDeferredTag>();
+      copy.template operator()<schedule::DependsOn>();
+      copy.template operator()<schedule::InSet>();
+      copy.template operator()<schedule::SysExecutor>();
+      copy.template operator()<schedule::SysFactory>();
+      if (meta_world_.get_component<schedule::SysExecutor>(e)) {
+        destination.add(schedule::SysStatus{}).add(schedule::SysQuery{});
+      }
+      if (meta_world_.get_component<schedule::SysCmdBuf>(e))
+        destination.add(schedule::SysCmdBuf{});
+    });
+    return runtime;
+  }
+
   World meta_world_;
   std::unordered_map<std::string, entity_t> symbol_table_;
   uint32_t anon_counter_ = 0;
@@ -182,10 +264,6 @@ template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
     using RawFunc = std::decay_t<Func>;
     using Adapter = system_adapter_t<RawFunc>;
 
-    auto query_ptr = Adapter::template make_query<RawFunc>();
-    auto executor =
-        Adapter::template make_executor<RawFunc>(std::move(f_orig), query_ptr);
-
     // ── unified tail: register components onto meta-world entity ──
     auto view = sched->meta_world().entity(e);
 
@@ -196,9 +274,15 @@ template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
       effective_th = ThreadingModel::Exclusive;
     }
 
-    view.add(SysExecutor{std::move(executor), effective_th, k});
-    if (query_ptr)
-      view.add(SysQuery{query_ptr});
+    view.add(SysExecutor{nullptr, effective_th, k});
+    // Keep an unexecuted prototype; each runtime receives its own copy and query.
+    view.add(SysFactory{[prototype = std::move(f_orig)](
+        World*, std::shared_ptr<void>& query) -> RunClosure {
+      auto query_ptr = Adapter::template make_query<RawFunc>();
+      auto executor = Adapter::template make_executor<RawFunc>(RawFunc(prototype), query_ptr);
+      query = std::move(query_ptr);
+      return executor;
+    }});
 
     // ⚠️ THREAD-SAFETY: WorldSystem/WorldMutSystem do NOT receive SysCmdBuf.
     // They may call world.spawn() directly → NOT thread-safe (EntityIndex
@@ -209,7 +293,7 @@ template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
     //    using cmd.spawn() may relax auto-Exclusive in the future.
     constexpr bool has_cmd = has_cmd_buf_v<RawFunc>;
     if constexpr (has_cmd || IterSystem<RawFunc> || WorldCmdSystem<RawFunc> || WorldViewCmdSystem<RawFunc>) {
-      view.add(SysCmdBuf{std::make_shared<CommandBuffer>()});
+      view.add(SysCmdBuf{});
     }
 
     for (const auto &t : deps.afters)
@@ -222,6 +306,8 @@ template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
       view.add(InSet{set_e});
     }
   };
+  single_use_ = true;
+  consumed_ = false;
   return *this;
 }
 
@@ -245,7 +331,7 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
                    name = name_](elysia::Scheduler *sched, entity_t e,
                                  schedule::SystemBuilder::Deps deps) {
     auto view = sched->meta_world().entity(e);
-    view.add(SysFactory{[](World *w) -> RunClosure {
+    view.add(SysFactory{[](World *w, std::shared_ptr<void>&) -> RunClosure {
       T instance;
       if constexpr (requires { instance.init(w); })
         instance.init(w);
@@ -283,7 +369,7 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
     }
 
     if constexpr (takes_wv_cmd || takes_world_cmd) {
-      view.add(SysCmdBuf{std::make_shared<CommandBuffer>()});
+      view.add(SysCmdBuf{});
     }
     view.add(SysExecutor{nullptr, effective_th, k});
     for (const auto &t : deps.afters)
@@ -293,11 +379,16 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
     if (!deps.in_set.empty())
       view.add(InSet{sched->resolve(deps.in_set)});
   };
+  single_use_ = false;
+  consumed_ = false;
   return *this;
 }
 
 void SystemBuilder::build(elysia::Scheduler &sched) {
   if (build_action_) {
+    if (consumed_)
+      throw std::logic_error("System callable has already been transferred");
+    if (single_use_) consumed_ = true;
     build_action_(&sched, sched.add_system_entity(name_), deps_);
   } else if (kind_ == SpecialSystemKind::ApplyDeferred) {
     entity_t e = sched.add_system_entity(name_);

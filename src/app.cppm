@@ -83,7 +83,9 @@ public:
       startup_exec->run(&world_);
       is_started_ = true;
     }
-    executor_ = SerialExecutor::build_from(scheduler_);
+    if (!runtime_) runtime_ = scheduler_.instantiate(world_);
+    executor_ = SerialExecutor::build_from(runtime_);
+    use_parallel_ = false;
   }
   void init() { init_serial(); }
   void init_parallel() {
@@ -92,7 +94,8 @@ public:
       startup_exec->run(&world_);
       is_started_ = true;
     }
-    parallel_executor_ = TaskflowExecutor::build_from(scheduler_);
+    if (!runtime_) runtime_ = scheduler_.instantiate(world_);
+    parallel_executor_ = TaskflowExecutor::build_from(runtime_);
     use_parallel_ = true;
   }
 
@@ -111,6 +114,7 @@ private:
   World world_;
   Scheduler scheduler_;
   Scheduler startup_scheduler_; // 🌸 Startup phase
+  std::shared_ptr<ScheduleRuntime> runtime_;
   std::unique_ptr<SerialExecutor> executor_;
   std::unique_ptr<TaskflowExecutor> parallel_executor_;
   bool is_started_ = false;

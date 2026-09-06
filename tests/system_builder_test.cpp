@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <vector>
+#include <memory>
+#include <stdexcept>
 
 import elysia.world;
 import elysia.schedule;
@@ -103,4 +105,52 @@ TEST(SystemBuilder, WorldViewSystemRun) {
     int sum = 0;
     world.query<Val>().each([&](Val &v) { sum += v.x; });
     EXPECT_EQ(sum, 55); // 5 entities * (1 + 10)
+}
+
+TEST(SystemBuilder, CallableTransfersOnce) {
+    World world;
+    Scheduler first, second;
+    auto e = world.spawn().add(Val{0}).entity;
+    auto builder = schedule::SystemBuilder("Owned").run(
+        [values = std::vector<int>{7}](Val& v) { if (!values.empty()) v.x += values[0]; });
+    builder.build(first);
+    EXPECT_THROW(builder.build(first), std::logic_error);
+    EXPECT_THROW(builder.build(second), std::logic_error);
+    int systems = 0;
+    second.meta_world().query<schedule::SysName>().each([&](auto&) { ++systems; });
+    EXPECT_EQ(systems, 0);
+    auto consumed_copy = builder;
+    EXPECT_THROW(consumed_copy.build(second), std::logic_error);
+    SerialExecutor::build_from(first)->run(&world);
+    EXPECT_EQ(world.get_component<Val>(e)->x, 7);
+
+    builder.run([](Val& v) { v.x += 3; });
+    EXPECT_NO_THROW(builder.build(second));
+}
+
+TEST(SystemBuilder, CallableOutlivesBuilderAndUnusedCopiesAreIndependent) {
+    World a, b;
+    auto ea = a.spawn().add(Val{0}).entity;
+    auto eb = b.spawn().add(Val{0}).entity;
+    std::weak_ptr<int> lifetime;
+    {
+        Scheduler first, second;
+        {
+            auto owned = std::make_shared<int>(7);
+            lifetime = owned;
+            auto builder = schedule::SystemBuilder("Owned").run(
+                [owned, calls = 0](Val& v) mutable { v.x += *owned + calls++; });
+            auto copy = builder;
+            builder.build(first);
+            copy.build(second);
+        }
+        EXPECT_FALSE(lifetime.expired());
+        auto exec = SerialExecutor::build_from(first);
+        exec->run(&a);
+        exec->run(&a);
+        SerialExecutor::build_from(second)->run(&b);
+        EXPECT_EQ(a.get_component<Val>(ea)->x, 15);
+        EXPECT_EQ(b.get_component<Val>(eb)->x, 7);
+    }
+    EXPECT_TRUE(lifetime.expired());
 }

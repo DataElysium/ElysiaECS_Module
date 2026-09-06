@@ -139,3 +139,42 @@ app.add_startup_system("Init", [](World& w) {
 1.  **Prefer BulkSystems**: For high-frequency tasks involving over 10,000 entities, Bulk pointer iteration is the only choice.
 2.  **Avoid Frequent Syncs**: Every `CommandBuffer` submission fractures a wave. Try to handle them uniformly at the end of a Stage.
 3.  **Res<T> vs World***: If you only need to access a few specific resources, prioritize `Res<T>`. It allows the scheduler to discover and parallelize your task earlier.
+
+## World runtimes
+
+A `Scheduler` stores system definitions and dependencies. Instantiate a separate
+runtime for each world; every runtime owns its system instances, query caches,
+command buffers, and initialization state.
+
+```cpp
+Scheduler scheduler;
+scheduler.system("Move").run<MovementSystem>().build();
+auto runtimeA = scheduler.instantiate(worldA);
+auto runtimeB = scheduler.instantiate(worldB);
+auto executorA = SerialExecutor::build_from(runtimeA);
+auto executorB = SerialExecutor::build_from(runtimeB);
+// These calls may run on separate threads.
+executorA->run(&worldA);
+executorB->run(&worldB);
+```
+
+Taskflow and ForkUnion accept the same runtime handles. Passing an existing
+runtime to another executor preserves its state; use those executors sequentially.
+`build_from(scheduler)` instead creates a fresh snapshot and binds it on first run.
+A runtime rejects a different world. Its world must outlive it.
+
+Runtime creation snapshots the definitions, so subsequent scheduler edits affect
+only new runtimes. The scheduler may be destroyed while its runtimes remain alive.
+Serialize snapshot creation with other snapshot creation and scheduler edits.
+Execution of already-created runtimes does not access the scheduler.
+
+`run<T>()` constructs and initializes a fresh functor per runtime. `run(callable)`
+transfers the callable into the definition once; each runtime copies that unexecuted
+prototype and creates fresh adapter query state. Callables must remain copyable.
+References, raw pointers, and `shared_ptr` captures retain their normal sharing
+semantics; callers must synchronize shared external state. Already-prepared query
+objects captured by user code are also copied as supplied; prefer `run<T>()` for
+systems owning world-specific query state.
+
+`App` retains one runtime across executor changes. Register systems before its
+first initialization; later definition edits do not modify that runtime.
