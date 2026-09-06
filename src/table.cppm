@@ -32,11 +32,13 @@ public:
         std::vector<size_t> component_offsets;
         size_t total_size;
         size_t capacity; 
+        size_t alignment;
     };
 
     static Layout calculate_layout(std::span<const TypeInfo* const> types, size_t capacity) {
         Layout layout;
         layout.capacity = capacity;
+        layout.alignment = std::max(alignof(Entity), alignof(std::max_align_t));
         
         size_t current_offset = 0;
         layout.entity_offset = current_offset;
@@ -44,6 +46,7 @@ public:
         
         layout.component_offsets.clear();
         for (const auto* type : types) {
+            layout.alignment = std::max(layout.alignment, type->alignment);
             current_offset = (current_offset + type->alignment - 1) & ~(type->alignment - 1);
             layout.component_offsets.push_back(current_offset);
             current_offset += capacity * type->size;
@@ -57,13 +60,13 @@ public:
     {
         types_.assign(types.begin(), types.end());
         layout_ = calculate_layout(types_, capacity);
-        data_ = static_cast<std::byte*>(alloc_->allocate(layout_.total_size));
+        data_ = static_cast<std::byte*>(alloc_->allocate(layout_.total_size, layout_.alignment));
     }
 
     ~Chunk() {
         if (data_) {
             clear();
-            alloc_->deallocate(data_, layout_.total_size);
+            alloc_->deallocate(data_, layout_.total_size, layout_.alignment);
         }
     }
 
@@ -91,7 +94,7 @@ public:
     void resize(size_t new_capacity) {
         assert(new_capacity > layout_.capacity);
         Layout new_layout = calculate_layout(types_, new_capacity);
-        std::byte* new_data = static_cast<std::byte*>(alloc_->allocate(new_layout.total_size));
+        std::byte* new_data = static_cast<std::byte*>(alloc_->allocate(new_layout.total_size, new_layout.alignment));
 
         // Relocate Entities
         std::memcpy(new_data + new_layout.entity_offset, data_ + layout_.entity_offset, count_ * sizeof(Entity));
@@ -114,7 +117,7 @@ public:
             }
         }
 
-        alloc_->deallocate(data_, layout_.total_size);
+        alloc_->deallocate(data_, layout_.total_size, layout_.alignment);
         data_ = new_data;
         layout_ = new_layout;
     }

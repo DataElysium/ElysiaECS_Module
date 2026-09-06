@@ -29,7 +29,8 @@ struct Entity {
     static constexpr uint32_t TAG_BITS     = 16;
 
     // Null Entity
-    static constexpr uint64_t NULL_VALUE   = 0;
+    // Keep ID zero available to the allocator without aliasing the null handle.
+    static constexpr uint64_t NULL_VALUE   = std::numeric_limits<uint64_t>::max();
 
     // Constructors
     constexpr Entity() : value(NULL_VALUE) {}

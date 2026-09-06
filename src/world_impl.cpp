@@ -374,6 +374,11 @@ void WorldBatchAccessor::spawn_bundle(Entity e, std::span<const TypeInfo* const>
     auto* arch = world->graph().get_or_create(types);
     if (!arch) return;
 
+    // Claim the ID through the same lifecycle checks as a plain spawn. This
+    // also advances the allocation counter and removes explicitly reused IDs
+    // from the available recycled pool.
+    if (world->index().spawn_at(e).is_err()) return;
+
     // 🌸 FIX: If entity already has an archetype (e.g. from world.spawn()), 
     // we must remove it from there first to avoid duplication!
     auto res_lookup = world->index().lookup(e);
@@ -387,9 +392,12 @@ void WorldBatchAccessor::spawn_bundle(Entity e, std::span<const TypeInfo* const>
                 if (moved_entity) world->index().update(*moved_entity, old_arch, rec->row);
                 rec->archetype = nullptr; // Clear before re-assigning
             } else {
-                // Already in the correct archetype? Just update data.
-                // For a "spawn" bundle, we usually assume it's a new insertion, 
-                // but let's be safe.
+                // Replace components in the existing row, including their
+                // destructors and OnAdd notifications, without appending it.
+                for (size_t k = 0; k < types.size(); ++k) {
+                    world->add_component_dynamic(e, types[k], datas[k]);
+                }
+                return;
             }
         }
     }
@@ -433,4 +441,3 @@ void* World::get_resource_dynamic(uint64_t id) const {
 }
 
 } // namespace elysia
-

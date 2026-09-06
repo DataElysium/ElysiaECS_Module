@@ -36,6 +36,11 @@ void execute_buffer_internal(World& world, CommandBuffer& input, CommandBuffer& 
                         const auto* meta = input.get_meta(next_h.meta_index);
                         assert(meta);
                         const auto* info = static_cast<const TypeInfo*>(meta->metadata);
+
+                        // A repeated type must execute as a later Insert, so
+                        // replacement lifetimes and observer order are preserved.
+                        if (std::any_of(fused_types.begin(), fused_types.end(),
+                            [info](const TypeInfo* type) { return type->id == info->id; })) break;
                         
                         auto it_dec = world.decorators_.find(info->id);
                         if (it_dec != world.decorators_.end()) {

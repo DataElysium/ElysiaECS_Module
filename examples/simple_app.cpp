@@ -8,7 +8,7 @@
     #define NOGDI
     #define NOUSER
 #endif
-#include <fork_union.hpp>
+#include <forkunion.hpp>
 #if defined(_WIN32)
     #undef Rectangle
     #undef CloseWindow

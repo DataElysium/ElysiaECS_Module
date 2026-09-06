@@ -7,7 +7,16 @@ module;
 #include <chrono>
 #include <unordered_map>
 #include <taskflow/taskflow.hpp>
-#include <fork_union.hpp>
+#include <numeric>
+// ForkUnion 3.0.3 uses the pre-P4052 name. Limit the alias to its header.
+#if defined(__cpp_lib_saturation_arithmetic) && __cpp_lib_saturation_arithmetic >= 202603L
+#pragma push_macro("add_sat")
+#define add_sat saturating_add
+#include <forkunion.hpp>
+#pragma pop_macro("add_sat")
+#else
+#include <forkunion.hpp>
+#endif
 
 export module elysia.schedule:executor;
 
@@ -23,7 +32,7 @@ import elysia.core;
 import graph;
 import graph.algo;
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 export namespace elysia {
 
@@ -99,7 +108,7 @@ private:
         sched_->meta_world().query<schedule::SysCmdBuf>().each([&](auto& cmd) { if (cmd.ptr && !cmd.ptr->headers().empty()) { world->submit(*cmd.ptr); cmd.ptr->clear(); } });
     }
 
-    fu::basic_pool_t pool_; std::vector<Wave> waves_; Scheduler* sched_ = nullptr; World* bound_world_ = nullptr;
+    fu::flat_pool_t pool_; std::vector<Wave> waves_; Scheduler* sched_ = nullptr; World* bound_world_ = nullptr;
 };
 
 class SerialExecutor : public schedule::SysExecutor {
