@@ -7,6 +7,8 @@ import elysia.query;
 import elysia.meta;
 import elysia.entity;
 
+namespace elysia_test::elysia_tag_test {
+
 using namespace elysia;
 
 struct Pos { float x; };
@@ -87,3 +89,5 @@ TEST(ElysiaTag, ZeroCostCheck) {
     static_assert(Q::DataCount == 1, "TagA should be filtered out of DataTuple");
     static_assert(std::is_same_v<std::tuple_element_t<0, Q::DataTuple>, Pos>, "Only Pos should remain");
 }
+
+} // namespace elysia_test::elysia_tag_test

@@ -7,6 +7,8 @@ import elysia.query;
 import elysia.meta;
 import elysia.entity;
 
+namespace elysia_test::elysia_world_test {
+
 using namespace elysia;
 
 struct Pos { float x, y; };
@@ -92,3 +94,5 @@ TEST(ElysiaWorld, QueryIteration) {
     
     EXPECT_EQ(count, 50);
 }
+
+} // namespace elysia_test::elysia_world_test

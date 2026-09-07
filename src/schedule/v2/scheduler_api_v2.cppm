@@ -1,5 +1,7 @@
 module;
 #include <vector>
+#include <atomic>
+#include <exception>
 #include <stdexcept>
 #include <memory>
 #include <string>
@@ -57,13 +59,31 @@ public:
 
     void run(World* world) {
         if (!world || world != bound_world_) init_all(world);
-        for (const auto& wave : waves_) {
-            if (!wave.parallel_systems.empty()) {
-                pool_.for_n_dynamic(wave.parallel_systems.size(), [&](size_t i) noexcept { execute_system(world, wave.parallel_systems[i]); });
+        try {
+            for (const auto& wave : waves_) {
+                if (!wave.parallel_systems.empty()) {
+                    std::atomic<bool> failed{false};
+                    std::exception_ptr error;
+                    pool_.for_n_dynamic(wave.parallel_systems.size(), [&](size_t i) noexcept {
+                        if (failed.load(std::memory_order_relaxed)) return;
+                        try {
+                            execute_system(world, wave.parallel_systems[i]);
+                        } catch (...) {
+                            // Only the first failing worker writes the exception.
+                            if (!failed.exchange(true, std::memory_order_relaxed))
+                                error = std::current_exception();
+                        }
+                    });
+                    // for_n_dynamic joins the wave before the caller reads error.
+                    if (error) std::rethrow_exception(error);
+                }
+                for (auto e : wave.exclusive_systems) execute_system(world, e);
             }
-            for (auto e : wave.exclusive_systems) execute_system(world, e);
+            flush_all_buffers(world);
+        } catch (...) {
+            runtime_->discard_commands();
+            throw;
         }
-        flush_all_buffers(world);
     }
 
 private:
@@ -131,28 +151,33 @@ public:
         using Clock = std::chrono::steady_clock;
         using Ms    = std::chrono::duration<float, std::milli>;
 #endif
-        for (auto e : plan_) {
-            auto view = meta_world_->entity(e);
-            auto* exec = view.get<schedule::SysExecutor>();
-            if (auto* q_comp = view.get<schedule::SysQuery>(); q_comp && q_comp->ptr) world->update_query(*static_cast<QueryState*>(q_comp->ptr.get()));
-            auto* cmd_comp = view.get<schedule::SysCmdBuf>();
-            void* cmd_ptr = cmd_comp ? cmd_comp->ptr.get() : nullptr;
-            if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) {
-                flush_all_buffers(world);
-            } else if (exec->func) {
-#ifdef ELYSIA_PERF_OVERLAY
-                auto t0 = Clock::now();
-                exec->func(world, nullptr, cmd_ptr);
-                float ms = Ms(Clock::now() - t0).count();
-                const char* name = "";
-                if (auto* n = view.get<schedule::SysName>()) name = n->value.c_str();
-                sys_times_.push_back({name, ms});
-#else
-                exec->func(world, nullptr, cmd_ptr);
-#endif
+        try {
+            for (auto e : plan_) {
+                auto view = meta_world_->entity(e);
+                auto* exec = view.get<schedule::SysExecutor>();
+                if (auto* q_comp = view.get<schedule::SysQuery>(); q_comp && q_comp->ptr) world->update_query(*static_cast<QueryState*>(q_comp->ptr.get()));
+                auto* cmd_comp = view.get<schedule::SysCmdBuf>();
+                void* cmd_ptr = cmd_comp ? cmd_comp->ptr.get() : nullptr;
+                if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) {
+                    flush_all_buffers(world);
+                } else if (exec->func) {
+    #ifdef ELYSIA_PERF_OVERLAY
+                    auto t0 = Clock::now();
+                    exec->func(world, nullptr, cmd_ptr);
+                    float ms = Ms(Clock::now() - t0).count();
+                    const char* name = "";
+                    if (auto* n = view.get<schedule::SysName>()) name = n->value.c_str();
+                    sys_times_.push_back({name, ms});
+    #else
+                    exec->func(world, nullptr, cmd_ptr);
+    #endif
+                }
             }
+            flush_all_buffers(world);
+        } catch (...) {
+            runtime_->discard_commands();
+            throw;
         }
-        flush_all_buffers(world);
     }
     struct SysTime { const char* name; float ms; };
     const std::vector<SysTime>& sys_times() const { return sys_times_; }
@@ -194,8 +219,15 @@ public:
 #ifdef ELYSIA_PERF_OVERLAY
         sys_times_.clear();
 #endif
-        executor_.run(taskflow_).wait();
-        flush_all_buffers(world);
+        try {
+            // get waits for cancellation/running tasks and rethrows task failures.
+            executor_.run(taskflow_).get();
+            flush_all_buffers(world);
+        } catch (...) {
+            current_world_ = nullptr;
+            runtime_->discard_commands();
+            throw;
+        }
         current_world_ = nullptr;
     }
     struct SysTime { const char* name; float ms; };

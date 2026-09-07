@@ -6,6 +6,8 @@ import elysia.query;
 import elysia.meta;
 import elysia.entity;
 
+namespace elysia_test::elysia_query_builder_test {
+
 using namespace elysia;
 namespace elysia_query_builder_test {
 // Test Components
@@ -58,3 +60,5 @@ TEST(ElysiaQueryBuilder, DynamicFilterAPI) {
     EXPECT_EQ(count, 1); // Only e1 should match
     EXPECT_EQ(p1->value, 15.0f); // 10 + 5
 }
+
+} // namespace elysia_test::elysia_query_builder_test

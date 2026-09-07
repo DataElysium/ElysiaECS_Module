@@ -6,6 +6,8 @@ import elysia.world;
 import elysia.schedule;
 import elysia.entity;
 
+namespace elysia_test::scheduler_parallel_test {
+
 using namespace elysia;
 
 struct Val { int x; };
@@ -81,3 +83,5 @@ TEST(ElysiaScheduler, ParallelStructuralConsistency) {
     EXPECT_NE(world.get_component<Tag1>(e), nullptr);
     EXPECT_NE(world.get_component<Tag2>(e), nullptr);
 }
+
+} // namespace elysia_test::scheduler_parallel_test

@@ -6,6 +6,8 @@ import elysia.storage;
 import elysia.graph;
 import elysia.config;
 
+namespace elysia_test::elysia_graph_test {
+
 using namespace elysia;
 
 struct Pos { float x, y; };
@@ -48,3 +50,5 @@ TEST(ElysiaGraph, CycleStability) {
     
     EXPECT_EQ(arch_back, root);
 }
+
+} // namespace elysia_test::elysia_graph_test

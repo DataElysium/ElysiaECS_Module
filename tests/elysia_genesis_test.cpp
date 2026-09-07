@@ -5,6 +5,8 @@ import elysia.mem;
 import elysia.entity;
 import elysia.world;
 
+namespace elysia_test::elysia_genesis_test {
+
 TEST(ElysiaGenesis, EntityBitFields) {
     using namespace elysia;
     
@@ -48,3 +50,5 @@ struct Position { float x, y; };
 //     cmd.clear();
 //     EXPECT_EQ(cmd.headers().size(), 0);
 // }
+
+} // namespace elysia_test::elysia_genesis_test

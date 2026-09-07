@@ -8,6 +8,8 @@ import elysia.schedule;
 import elysia.entity;
 import elysia.storage;
 
+namespace elysia_test::scheduler_phase_test {
+
 using namespace elysia;
 
 struct Pos {
@@ -175,3 +177,5 @@ TEST(ElysiaScheduler, HighLoadPhaseChain) {
 
   EXPECT_NEAR(sum_x, (float)count, 0.1f);
 }
+
+} // namespace elysia_test::scheduler_phase_test

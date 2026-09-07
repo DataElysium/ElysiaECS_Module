@@ -178,3 +178,23 @@ systems owning world-specific query state.
 
 `App` retains one runtime across executor changes. Register systems before its
 first initialization; later definition edits do not modify that runtime.
+
+## System exceptions
+
+Serial, Taskflow, and ForkUnion propagate thrown system exceptions from `run()`
+to its caller, preserving their type and payload. On failure, dependent work is
+skipped and already-running workers finish before the exception reaches the caller.
+With simultaneous worker failures, one original exception is propagated; which one
+is unspecified. Independent work may already have run.
+
+Before rethrowing, the runtime discards pending commands in its injected system
+command buffers and releases their payloads. Earlier world mutations, submitted
+commands, and published messages are not rolled back. Application-owned queues and
+world command buffers are not managed by this cleanup. Command payload destructors
+must not throw.
+
+There is no automatic repair or retry. A caller may explicitly repair valid world
+state and start another run, or discard the world/runtime. Failures inside component
+lifecycle operations may leave application or world state unsuitable for reuse;
+propagating an exception is not a guarantee of transactional safety. Expected
+application outcomes can be communicated through messages instead of throwing.

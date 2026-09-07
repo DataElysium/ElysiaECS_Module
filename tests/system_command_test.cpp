@@ -5,6 +5,8 @@ import elysia.world;
 import elysia.schedule;
 import elysia.entity;
 
+namespace elysia_test::system_command_test {
+
 using namespace elysia;
 
 struct Val { int x; };
@@ -41,3 +43,5 @@ TEST(SystemBuilder, CommandBufferInjection) {
     auto* tag = world.get_component<Tag>(e);
     ASSERT_NE(tag, nullptr);
 }
+
+} // namespace elysia_test::system_command_test

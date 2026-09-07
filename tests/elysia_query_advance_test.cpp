@@ -7,6 +7,8 @@ import elysia.meta;
 import elysia.world;
 import elysia.entity;
 
+namespace elysia_test::elysia_query_advance_test {
+
 using namespace elysia;
 
 struct Pos { float x, y; };
@@ -71,3 +73,5 @@ TEST(ElysiaQuery4_7, ConstCorrectness) {
         // p.x = 200; // This would fail compilation if uncommented
     });
 }
+
+} // namespace elysia_test::elysia_query_advance_test

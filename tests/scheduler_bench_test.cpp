@@ -10,6 +10,8 @@ import elysia.schedule;
 import elysia.entity;
 import elysia.meta;
 
+namespace elysia_test::scheduler_bench_test {
+
 using namespace elysia;
 
 struct Pos { float x, y; };
@@ -77,3 +79,5 @@ TEST(ElysiaBench, GrandmaFriendlyAPI) {
     world.query<Pos>().each([&](Pos& p){ sum_x += p.x; });
     EXPECT_EQ(sum_x, 100.0f);
 }
+
+} // namespace elysia_test::scheduler_bench_test

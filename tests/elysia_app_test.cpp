@@ -4,6 +4,8 @@
 
 import elysia;
 
+namespace elysia_test::elysia_app_test {
+
 using namespace elysia;
 
 struct TagA {};
@@ -107,3 +109,5 @@ TEST(ElysiaApp, KeepsRuntimeWhenChangingExecutors) {
     EXPECT_EQ(observed, 3);
     EXPECT_EQ(last_thread, std::this_thread::get_id());
 }
+
+} // namespace elysia_test::elysia_app_test

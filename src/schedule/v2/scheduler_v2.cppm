@@ -115,12 +115,20 @@ private:
     meta_world_.query<schedule::SysQuery>().each([&](auto& query) {
       if (query.ptr) world->update_query(*static_cast<QueryState*>(query.ptr.get()));
     });
+    command_buffers_.clear();
     meta_world_.query<schedule::SysCmdBuf>().each([&](auto& cmd) {
       if (!cmd.ptr) cmd.ptr = std::make_shared<CommandBuffer>(&world->index());
       else cmd.ptr->set_index(&world->index());
+      command_buffers_.push_back(cmd.ptr.get());
     });
   }
 
+  // Called only after all workers have finished. No allocation during unwinding.
+  void discard_commands() noexcept {
+    for (auto* cmd : command_buffers_) cmd->clear();
+  }
+
+  std::vector<CommandBuffer*> command_buffers_;
   World* bound_world_ = nullptr;
   World meta_world_;
 };

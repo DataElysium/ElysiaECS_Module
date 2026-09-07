@@ -9,6 +9,8 @@ import elysia.schedule;
 import elysia.entity;
 import elysia.query;
 
+namespace elysia_test::system_builder_test {
+
 using namespace elysia;
 
 struct Val { int x; };
@@ -154,3 +156,5 @@ TEST(SystemBuilder, CallableOutlivesBuilderAndUnusedCopiesAreIndependent) {
     }
     EXPECT_TRUE(lifetime.expired());
 }
+
+} // namespace elysia_test::system_builder_test

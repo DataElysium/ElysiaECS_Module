@@ -116,3 +116,120 @@ TEST(SchedulerStressTest, ExceptionHandling) {
         app.update();
     }, std::runtime_error);
 }
+
+namespace {
+struct ExceptionValue { int value; };
+struct MissingSystemTarget { Entity entity; };
+template<class Executor> class SchedulerExceptions : public ::testing::Test {};
+using ExceptionExecutors = ::testing::Types<SerialExecutor, TaskflowExecutor, ForkUnionExecutor>;
+TYPED_TEST_SUITE(SchedulerExceptions, ExceptionExecutors);
+
+TYPED_TEST(SchedulerExceptions, PropagatesMissingEntityAndDiscardsPendingCommands) {
+    World world;
+    Entity target = world.spawn().add(ExceptionValue{7}).entity;
+    auto survivor = world.spawn().add(ExceptionValue{0}).entity;
+    bool despawn_once = true;
+    int downstream = 0;
+    Scheduler scheduler;
+    scheduler.system("Despawn").run([&](World* w) {
+        if (despawn_once) { w->despawn(target); despawn_once = false; }
+    }).build();
+    scheduler.system("Lookup").after("Despawn").run([&](WorldView w, CommandBuffer* cmd) {
+        if (!w.raw()->get_component<ExceptionValue>(target)) {
+            cmd->insert(survivor, ExceptionValue{99});
+            throw MissingSystemTarget{target};
+        }
+    }).build();
+    scheduler.system("After").after("Lookup").run([&]() { ++downstream; }).build();
+    auto exec = TypeParam::build_from(scheduler);
+    try {
+        exec->run(&world);
+        FAIL() << "Missing target must propagate to the caller";
+    } catch (const MissingSystemTarget& error) {
+        EXPECT_EQ(error.entity, target);
+    }
+    EXPECT_EQ(downstream, 0);
+    EXPECT_EQ(world.get_component<ExceptionValue>(target), nullptr);
+    EXPECT_EQ(world.get_component<ExceptionValue>(survivor)->value, 0);
+    // Explicit application repair, followed by a new run; no automatic retry.
+    target = world.spawn().add(ExceptionValue{7}).entity;
+    EXPECT_NO_THROW(exec->run(&world));
+    EXPECT_EQ(downstream, 1);
+    EXPECT_EQ(world.get_component<ExceptionValue>(survivor)->value, 0);
+}
+
+TYPED_TEST(SchedulerExceptions, ExclusiveFailureClearsOtherSystemsBuffers) {
+    World world;
+    auto entity = world.spawn().add(ExceptionValue{0}).entity;
+    bool fail = true;
+    int downstream = 0;
+    Scheduler scheduler;
+    scheduler.system("Queue").run([&](WorldView, CommandBuffer* cmd) {
+        if (fail) cmd->insert(entity, ExceptionValue{42});
+    }).build();
+    scheduler.system("Throw").after("Queue").run([&](World*) { if (fail) throw 17; }).build();
+    scheduler.system("After").after("Throw").run([&]() { ++downstream; }).build();
+    auto exec = TypeParam::build_from(scheduler);
+    try { exec->run(&world); FAIL() << "Expected integer exception"; }
+    catch (int value) { EXPECT_EQ(value, 17); }
+    EXPECT_EQ(downstream, 0);
+    EXPECT_EQ(world.get_component<ExceptionValue>(entity)->value, 0);
+    fail = false;
+    EXPECT_NO_THROW(exec->run(&world));
+    EXPECT_EQ(downstream, 1);
+    EXPECT_EQ(world.get_component<ExceptionValue>(entity)->value, 0);
+}
+
+template<class Executor> class ParallelSchedulerExceptions : public ::testing::Test {};
+using ParallelExceptionExecutors = ::testing::Types<TaskflowExecutor, ForkUnionExecutor>;
+TYPED_TEST_SUITE(ParallelSchedulerExceptions, ParallelExceptionExecutors);
+
+TYPED_TEST(ParallelSchedulerExceptions, WaitsForRunningWorkersBeforeRethrowing) {
+    if (std::thread::hardware_concurrency() < 2) GTEST_SKIP() << "Requires two workers";
+    World world;
+    std::atomic<bool> started{false}, release{false}, finished{false};
+    int downstream = 0;
+    Scheduler scheduler;
+    scheduler.system("Running").run([&]() {
+        started = true;
+        while (!release.load()) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        finished = true;
+    }).build();
+    scheduler.system("Throw").run([&]() {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!started.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        release = true;
+        throw std::runtime_error("parallel failure");
+    }).build();
+    scheduler.system("After").after("Throw").run([&]() { ++downstream; }).build();
+    auto exec = TypeParam::build_from(scheduler);
+    EXPECT_THROW(exec->run(&world), std::runtime_error);
+    EXPECT_TRUE(started.load());
+    EXPECT_TRUE(finished.load());
+    EXPECT_EQ(downstream, 0);
+}
+TYPED_TEST(ParallelSchedulerExceptions, SimultaneousFailuresPreserveOneOriginalException) {
+    if (std::thread::hardware_concurrency() < 2) GTEST_SKIP() << "Requires two workers";
+    World world;
+    std::atomic<int> entered{0};
+    Scheduler scheduler;
+    for (int id = 0; id < 2; ++id) {
+        scheduler.system(std::to_string(id)).run([&, id]() {
+            entered.fetch_add(1);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (entered.load() < 2 && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::yield();
+            throw id;
+        }).build();
+    }
+    auto exec = TypeParam::build_from(scheduler);
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        entered = 0;
+        try { exec->run(&world); FAIL() << "Expected a worker exception"; }
+        catch (int id) { EXPECT_TRUE(id == 0 || id == 1); }
+        EXPECT_EQ(entered.load(), 2);
+    }
+}
+} // namespace

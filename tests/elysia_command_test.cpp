@@ -5,6 +5,8 @@ import elysia.world;
 import elysia.meta;
 import elysia.entity;
 
+namespace elysia_test::elysia_command_test {
+
 using namespace elysia;
 
 struct Pos { float x, y; };
@@ -73,3 +75,5 @@ TEST(ElysiaCommand, InterleavedOps) {
     EXPECT_EQ(world.entity(e2).get<Pos>(), nullptr);
     EXPECT_NE(world.entity(e2).get<Vel>(), nullptr);
 }
+
+} // namespace elysia_test::elysia_command_test
