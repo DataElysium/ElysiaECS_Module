@@ -43,12 +43,12 @@ class ForkUnionExecutor : public schedule::SysExecutor {
     std::shared_ptr<ScheduleRuntime> runtime_;
 public:
     ForkUnionExecutor() { pool_.try_spawn(std::thread::hardware_concurrency()); }
-    static std::unique_ptr<ForkUnionExecutor> build_from(Scheduler& sched) { return build_from(sched.snapshot()); }
-    static std::unique_ptr<ForkUnionExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime) {
+    static std::unique_ptr<ForkUnionExecutor> build_from(Scheduler& sched, schedule::CompileOptions options = {}) { return build_from(sched.snapshot(), options); }
+    static std::unique_ptr<ForkUnionExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime, schedule::CompileOptions options = {}) {
         if (!runtime) throw std::invalid_argument("Executor requires a schedule runtime");
         auto exec = std::make_unique<ForkUnionExecutor>();
         exec->runtime_ = std::move(runtime);
-        exec->compile(*exec->runtime_);
+        exec->compile(*exec->runtime_, options);
         return exec;
     }
 
@@ -88,9 +88,9 @@ public:
 
 private:
     struct Wave { std::vector<entity_t> parallel_systems; std::vector<entity_t> exclusive_systems; };
-    void compile(ScheduleRuntime& sched) {
+    void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
         sched_ = &sched; waves_.clear();
-        auto sg = schedule::build_dag(sched.meta_world());
+        auto sg = schedule::compile_dag(sched.meta_world(), options);
         auto layers = graph::algo::kahn_layers(sg);
         for (const auto& layer : layers) {
             Wave wave;
@@ -132,12 +132,12 @@ private:
 class SerialExecutor : public schedule::SysExecutor {
     std::shared_ptr<ScheduleRuntime> runtime_;
 public:
-    static std::unique_ptr<SerialExecutor> build_from(Scheduler& sched) { return build_from(sched.snapshot()); }
-    static std::unique_ptr<SerialExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime) {
+    static std::unique_ptr<SerialExecutor> build_from(Scheduler& sched, schedule::CompileOptions options = {}) { return build_from(sched.snapshot(), options); }
+    static std::unique_ptr<SerialExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime, schedule::CompileOptions options = {}) {
         if (!runtime) throw std::invalid_argument("Executor requires a schedule runtime");
         auto exec = std::make_unique<SerialExecutor>();
         exec->runtime_ = std::move(runtime);
-        exec->compile(*exec->runtime_);
+        exec->compile(*exec->runtime_, options);
         return exec;
     }
     void init_all(World* world) {
@@ -182,9 +182,9 @@ public:
     struct SysTime { const char* name; float ms; };
     const std::vector<SysTime>& sys_times() const { return sys_times_; }
 private:
-    void compile(ScheduleRuntime& sched) {
+    void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
         sched_ = &sched; meta_world_ = &sched.meta_world(); plan_.clear();
-        auto sg = schedule::build_dag(*meta_world_);
+        auto sg = schedule::compile_dag(*meta_world_, options);
         auto layers = graph::algo::kahn_layers(sg);
         for (const auto& layer : layers) {
             for (auto node_idx : layer) {
@@ -201,12 +201,12 @@ private:
 class TaskflowExecutor : public schedule::SysExecutor {
     std::shared_ptr<ScheduleRuntime> runtime_;
 public:
-    static std::unique_ptr<TaskflowExecutor> build_from(Scheduler& sched) { return build_from(sched.snapshot()); }
-    static std::unique_ptr<TaskflowExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime) {
+    static std::unique_ptr<TaskflowExecutor> build_from(Scheduler& sched, schedule::CompileOptions options = {}) { return build_from(sched.snapshot(), options); }
+    static std::unique_ptr<TaskflowExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime, schedule::CompileOptions options = {}) {
         if (!runtime) throw std::invalid_argument("Executor requires a schedule runtime");
         auto exec = std::make_unique<TaskflowExecutor>();
         exec->runtime_ = std::move(runtime);
-        exec->compile(*exec->runtime_);
+        exec->compile(*exec->runtime_, options);
         return exec;
     }
     void init_all(World* world) {
@@ -233,8 +233,8 @@ public:
     struct SysTime { const char* name; float ms; };
     const std::vector<SysTime>& sys_times() const { return sys_times_; }
 private:
-    void compile(ScheduleRuntime& sched) {
-        sched_ = &sched; meta_ptr_ = &sched.meta_world(); auto sg = schedule::build_dag(*meta_ptr_); std::unordered_map<uint32_t, tf::Task> tasks;
+    void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
+        sched_ = &sched; meta_ptr_ = &sched.meta_world(); auto sg = schedule::compile_dag(*meta_ptr_, options); std::unordered_map<uint32_t, tf::Task> tasks;
         auto order = graph::algo::kahn_layers(sg);
         if (order.has_cycle) throw std::logic_error("Taskflow schedule contains a dependency cycle");
         for (size_t i = 0; i < sg.node_count(); ++i) {

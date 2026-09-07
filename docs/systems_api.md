@@ -212,3 +212,66 @@ are rejected during Taskflow executor construction.
 Exclusivity is local to a runtime: independent world runtimes can still execute
 concurrently. Ordinary systems must declare ordering needed for conflicting
 access; this does not introduce automatic component conflict detection.
+
+## Schedule visualization
+
+Export registered systems, set boundaries, and declared ordering to Mermaid:
+
+```cpp
+auto& meta = app.scheduler().meta_world();
+auto dag = elysia::schedule::build_dag(meta);
+auto text = elysia::schedule::to_mermaid(dag, meta);
+// Convenience overload: to_mermaid(meta, MermaidDirection::LeftToRight)
+```
+
+The returned string contains a Mermaid flowchart, without Markdown fences. It
+does not execute systems or initialize a world runtime. Names are escaped using
+[Mermaid entity codes](https://mermaid.js.org/syntax/flowchart.html#entity-codes-to-escape-characters).
+Exclusive systems and deferred flushes are annotated; set start/end nodes remain
+explicit. The export shows declared ordering, not executor-added exclusive
+barriers, actual worker placement, or a timing trace. Cyclic graphs can also be
+exported for inspection.
+
+An ordinary empty callable (`.run([] {})`) is a valid design-time system. There
+is no special placeholder registration or execution restriction. Referenced names
+with no system or set registration appear as `[unresolved]` nodes with their
+original edges. Export does not validate or prune these slots.
+
+## Compile options and empty slots
+
+```cpp
+using namespace elysia;
+schedule::CompileOptions options;
+options.missing_labels = schedule::MissingLabelPolicy::Fill; // default
+options.prune_empty_endpoints = true;                       // default
+
+auto executor = TaskflowExecutor::build_from(scheduler, options);
+// SerialExecutor and ForkUnionExecutor accept the same options, including
+// when building from an existing shared ScheduleRuntime.
+```
+
+`Fill` retains unresolved slots as dependency-only nodes. In particular,
+`A -> Missing -> B` still orders A before B. This replaces the old behavior of
+silently dropping edges to unknown names. `Reject` reports the unresolved names
+and refuses compilation, even if the missing slots could have been pruned.
+Validation occurs on the completed runtime snapshot, after plugin registration.
+All executors reject dependency cycles, including cycles through empty slots.
+
+Compilation then recursively prunes structural no-op sources and sinks (unresolved
+slots and set boundaries). Interior empty joins remain, preserving ordering
+without expanding fan-in/fan-out edges. Registered callables, including empty
+lambdas, are not inspected or pruned. Set `prune_empty_endpoints = false` to retain
+all structural nodes in the compiled DAG.
+
+```cpp
+auto logical = schedule::build_dag(scheduler.meta_world());
+auto plan = schedule::compile_dag(scheduler.meta_world(), options);
+auto logical_mermaid = schedule::to_mermaid(logical, scheduler.meta_world());
+auto plan_mermaid = schedule::to_mermaid(plan, scheduler.meta_world());
+```
+
+Neither operation modifies the metaworld. An executor owns its runtime snapshot:
+registering a previously missing system afterward affects only a newly compiled
+runtime. The old runtime keeps its original behavior. Rebuilding from the scheduler
+creates fresh runtime system state; this is not live state migration. Changes to
+an already running plan are not supported.

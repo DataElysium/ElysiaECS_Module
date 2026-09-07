@@ -11,7 +11,7 @@ export namespace elysia::schedule {
      * @brief Unique identifier for a node in the execution DAG.
      */
     struct GraphNode {
-        enum Type : uint8_t { System, SetStart, SetEnd } type;
+        enum Type : uint8_t { System, SetStart, SetEnd, Unresolved } type;
         entity_t entity;
 
         bool operator==(const GraphNode& o) const { 
