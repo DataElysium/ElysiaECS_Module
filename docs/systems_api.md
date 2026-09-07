@@ -198,3 +198,17 @@ state and start another run, or discard the world/runtime. Failures inside compo
 lifecycle operations may leave application or world state unsuitable for reuse;
 propagating an exception is not a guarantee of transactional safety. Expected
 application outcomes can be communicated through messages instead of throwing.
+
+## Taskflow exclusivity
+
+Explicit exclusive systems, systems taking `World*`, and `ApplyDeferred` execute
+alone within their runtime. Taskflow keeps one graph, with parallel sections
+separated by these systems. Each section retains its original dependencies;
+ordinary topological layers do not introduce synchronization barriers. Unrelated
+work is placed before or after an exclusive system using a valid topological
+order; use explicit dependencies when that placement matters. Cyclic schedules
+are rejected during Taskflow executor construction.
+
+Exclusivity is local to a runtime: independent world runtimes can still execute
+concurrently. Ordinary systems must declare ordering needed for conflicting
+access; this does not introduce automatic component conflict detection.

@@ -235,6 +235,8 @@ public:
 private:
     void compile(ScheduleRuntime& sched) {
         sched_ = &sched; meta_ptr_ = &sched.meta_world(); auto sg = schedule::build_dag(*meta_ptr_); std::unordered_map<uint32_t, tf::Task> tasks;
+        auto order = graph::algo::kahn_layers(sg);
+        if (order.has_cycle) throw std::logic_error("Taskflow schedule contains a dependency cycle");
         for (size_t i = 0; i < sg.node_count(); ++i) {
             const auto& gn = sg.key(i);
             tasks[i] = taskflow_.emplace([this, e = gn.entity]() {
@@ -262,7 +264,45 @@ private:
 #endif
             }).name(std::to_string(i));
         }
-        for (size_t i = 0; i < sg.node_count(); ++i) { for (const auto& edge : sg.out_edges(i)) tasks[i].precede(tasks[edge.to]); }
+        // A valid topological order places unrelated work consistently around
+        // exclusive systems without imposing barriers between ordinary layers.
+        const auto count = sg.node_count();
+        std::vector<std::vector<size_t>> sections(1);
+        std::vector<size_t> barriers;
+        std::vector<size_t> section_of(count, count + 1);
+        for (auto i : order.nodes_sorted) {
+            auto* exec = meta_ptr_->entity(sg.key(i).entity).get<schedule::SysExecutor>();
+            if (exec && (exec->threading == schedule::ThreadingModel::Exclusive ||
+                         exec->kind == schedule::SpecialSystemKind::ApplyDeferred)) {
+                barriers.push_back(i);
+                sections.emplace_back();
+            } else {
+                section_of[i] = sections.size() - 1;
+                sections.back().push_back(i);
+            }
+        }
+
+        // Cross-section edges are implied by the exclusive boundaries. Keep
+        // internal edges and connect only each section's roots and sinks.
+        std::vector<bool> has_predecessor(count), has_successor(count);
+        for (size_t i = 0; i < count; ++i) {
+            if (section_of[i] == count + 1) continue;
+            for (const auto& edge : sg.out_edges(i)) {
+                if (section_of[i] != section_of[edge.to]) continue;
+                tasks[i].precede(tasks[edge.to]);
+                has_successor[i] = has_predecessor[edge.to] = true;
+            }
+        }
+        for (size_t s = 0; s < sections.size(); ++s) {
+            if (sections[s].empty() && s > 0 && s < barriers.size())
+                tasks[barriers[s - 1]].precede(tasks[barriers[s]]);
+            for (auto i : sections[s]) {
+                if (s > 0 && !has_predecessor[i])
+                    tasks[barriers[s - 1]].precede(tasks[i]);
+                if (s < barriers.size() && !has_successor[i])
+                    tasks[i].precede(tasks[barriers[s]]);
+            }
+        }
     }
     void flush_all_buffers(World* world) { meta_ptr_->query<schedule::SysCmdBuf>().each([&](auto& c) { if (c.ptr && !c.ptr->headers().empty()) { world->submit(*c.ptr); c.ptr->clear(); } }); }
     ScheduleRuntime* sched_ = nullptr;
