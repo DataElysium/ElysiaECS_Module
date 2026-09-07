@@ -100,8 +100,8 @@ public:
         enable_generic_codec<T>(fac);
         enable_msgpack_codec<T>(fac);
 
-        factories_[fac.type_id] = std::move(fac);
         key_to_id_[fac.key] = fac.type_id;
+        factories_[fac.type_id] = std::move(fac);
         
         return Result<void>::ok();
     }
@@ -154,8 +154,8 @@ public:
         };
         fac.msgpack = std::move(mc);
 
-        factories_[fac.type_id] = std::move(fac);
         key_to_id_[fac.key] = fac.type_id;
+        factories_[fac.type_id] = std::move(fac);
         return Result<void>::ok();
     }
 
@@ -249,6 +249,13 @@ public:
         enable_resource_codec<T>(fac);
         
         resource_factories_[fac.type_id] = std::move(fac);
+    }
+
+    const ComponentFactory* find(const std::string& name) const {
+        auto key = key_to_id_.find(name);
+        if (key == key_to_id_.end()) return nullptr;
+        auto factory = factories_.find(key->second);
+        return factory == factories_.end() ? nullptr : &factory->second;
     }
 
     const std::unordered_map<uint64_t, ComponentFactory>& factories() const { return factories_; }

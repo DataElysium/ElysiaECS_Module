@@ -1,0 +1,15 @@
+{
+            "branch": {
+                "params": {"r": 1.0, "a":null, "b":null},
+                "body": [
+                    {"id":0,"components":{"Resistor":"$r","Net":["$a","mid"]}},
+                    {"id":1,"components":{"Resistor":"$r","Net":["mid","$b"]}}
+                ]
+            },
+            "pair": {
+                "body": [
+                    {"id":0,"components":{"Use":{"prefab":"branch","params":{"r":2.0,"a":"x","b":"@gnd"}}}},
+                    {"id":1,"components":{"Use":{"prefab":"branch","params":{"r":3.0,"a":"y","b":"@gnd"}}}}
+                ]
+            }
+        }

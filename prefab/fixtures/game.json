@@ -1,0 +1,84 @@
+{
+  "prefabs": {
+    "wheel": {
+      "params": { "x": 0.0, "y": 0.0 },
+      "body": [
+        {
+          "id": 0,
+          "components": {
+            "Transform": { "position": [0.0, 0.0, 0.0], "size": [30.0, 30.0, 0.0], "rotation": 0.0 },
+            "Visual": { "color": [0.08, 0.08, 0.1, 1.0] },
+            "CarWheel": { "offset": ["$x", "$y"], "spin_factor": 0.08 }
+          }
+        }
+      ]
+    },
+    "player_rect": {
+      "params": { "x": 180.0, "y": 450.0, "color": [0.95, 0.35, 0.2, 1.0] },
+      "body": [
+        {
+          "id": 0,
+          "components": {
+            "Transform": { "position": ["$x", "$y", 0.0], "size": [60.0, 60.0, 0.0], "rotation": 0.0 },
+            "Visual": { "color": "$color" },
+            "Velocity": { "vec": [0.0, 0.0] },
+            "Gravity": { "force": 0.3 },
+            "PlayerControl": { "speed": 4.0, "jump_force": 12.0 },
+            "Collider": { "half_extents": [30.0, 30.0] }
+          }
+        }
+      ]
+    },
+    "player_car": {
+      "params": { "x": 180.0, "y": 450.0, "color": [0.1, 0.5, 0.9, 1.0] },
+      "body": [
+        {
+          "id": 0,
+          "components": {
+            "Transform": { "position": ["$x", "$y", 0.0], "size": [150.0, 60.0, 0.0], "rotation": 0.0 },
+            "Visual": { "color": "$color" },
+            "Velocity": { "vec": [0.0, 0.0] },
+            "Gravity": { "force": 0.3 },
+            "PlayerControl": { "speed": 4.0, "jump_force": 12.0 },
+            "Collider": { "half_extents": [75.0, 60.0] },
+            "CarBody": {}
+          }
+        },
+        { "id": 1, "parent": 0, "components": { "Use": { "prefab": "wheel", "params": { "x": -52.0, "y": 30.0 } } } },
+        { "id": 2, "parent": 0, "components": { "Use": { "prefab": "wheel", "params": { "x": 52.0, "y": 30.0 } } } },
+        { "id": 3, "parent": 0, "components": { "Use": { "prefab": "wheel", "params": { "x": -52.0, "y": -20.0 } } } },
+        { "id": 4, "parent": 0, "components": { "Use": { "prefab": "wheel", "params": { "x": 52.0, "y": -20.0 } } } }
+      ]
+    },
+    "bouncy_box": {
+      "body": [
+        {
+          "id": 1,
+          "components": {
+            "Transform": { "position": [300.0, 50.0, 0.0], "size": [60.0, 60.0, 0.0], "rotation": 0.0 },
+            "Visual": { "color": [0.9, 0.2, 0.2, 1.0] },
+            "Velocity": { "vec": [3.0, 0.0] },
+            "Gravity": { "force": 0.2 },
+            "Spin": { "speed": 0.05 }
+          }
+        }
+      ]
+    },
+    "ground": {
+      "body": [
+        {
+          "id": 1,
+          "components": {
+            "Transform": { "position": [400.0, 575.0, 0.0], "size": [800.0, 50.0, 0.0], "rotation": 0.0 },
+            "Visual": { "color": [0.3, 0.3, 0.3, 1.0] }
+          }
+        }
+      ]
+    }
+  },
+  "instances": [
+    { "id": "player", "prefab": "player_car" },
+    { "id": "box1", "prefab": "bouncy_box" },
+    { "id": "ground", "prefab": "ground" }
+  ]
+}
