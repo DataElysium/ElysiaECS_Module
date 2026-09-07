@@ -52,6 +52,11 @@ public:
     return *this;
   }
 
+  SystemBuilder &on_caller_thread(bool enabled = true) {
+    affinity_ = enabled ? ThreadAffinity::Caller : ThreadAffinity::Any;
+    return *this;
+  }
+
   // Callable registrations transfer once; run<T>() remains reusable.
   template <typename Func> SystemBuilder &run(Func &&f);
   template <typename T> SystemBuilder &run();
@@ -73,6 +78,7 @@ private:
   bool single_use_ = false;
   bool consumed_ = false;
   ThreadingModel threading_ = ThreadingModel::Parallel;
+  ThreadAffinity affinity_ = ThreadAffinity::Any;
   SpecialSystemKind kind_ = SpecialSystemKind::None;
   std::function<void(elysia::Scheduler *, entity_t, Deps)> build_action_;
 };
@@ -105,9 +111,14 @@ private:
       throw std::logic_error("Schedule runtime is already bound to another world");
     bound_world_ = world;
     meta_world_.query<schedule::SysFactory, schedule::SysExecutor,
-                      schedule::SysStatus, schedule::SysQuery>().each([&](auto& factory, auto& exec, auto& status, auto& query) {
+                      schedule::SysStatus, schedule::SysQuery, schedule::SysName>().each([&](auto& factory, auto& exec, auto& status, auto& query, auto& name) {
       if (!status.initialized) {
-        exec.func = factory.func(world, query.ptr);
+        try {
+          exec.func = factory.func(world, query.ptr);
+        } catch (const MissingResourceError& error) {
+          if (!error.system_name.empty()) throw;
+          throw MissingResourceError(error.resource_name, name.value);
+        }
         status.initialized = true;
       }
     });
@@ -261,13 +272,24 @@ private:
 
 // Implementations
 namespace schedule {
+// Add context only when a resource lookup fails; do not wrap every stored callable.
+inline Result<void> invoke_system(SysExecutor& exec, World* world, void* commands,
+                                 World& meta, entity_t entity) {
+    try { return exec.func(world, nullptr, commands); }
+    catch (const MissingResourceError& error) {
+        if (!error.system_name.empty()) throw;
+        auto* name = meta.get_component<SysName>(entity);
+        throw MissingResourceError(error.resource_name, name ? name->value : std::to_string(entity.id()));
+    }
+}
+
 // =============================================================================
 // run(Func&&) — adapter-based dispatch (replaces 7 if-constexpr branches)
 // =============================================================================
 template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
   build_action_ = [f_orig = std::forward<Func>(f), name = name_, k = kind_,
                    th =
-                       threading_](elysia::Scheduler *sched, entity_t e,
+                       threading_, affinity = affinity_](elysia::Scheduler *sched, entity_t e,
                                    schedule::SystemBuilder::Deps deps) mutable {
     using RawFunc = std::decay_t<Func>;
     using Adapter = system_adapter_t<RawFunc>;
@@ -282,7 +304,7 @@ template <typename Func> SystemBuilder &SystemBuilder::run(Func &&f) {
       effective_th = ThreadingModel::Exclusive;
     }
 
-    view.add(SysExecutor{nullptr, effective_th, k});
+    view.add(SysExecutor{nullptr, effective_th, k, affinity});
     // Keep an unexecuted prototype; each runtime receives its own copy and query.
     view.add(SysFactory{[prototype = std::move(f_orig)](
         World*, std::shared_ptr<void>& query) -> RunClosure {
@@ -335,7 +357,7 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
     !takes_wv_cmd && !takes_world_cmd && !takes_world &&
     requires(T& inst, WorldView wv) { inst(wv); };
 
-  build_action_ = [th = threading_, k = kind_,
+  build_action_ = [th = threading_, affinity = affinity_, k = kind_,
                    name = name_](elysia::Scheduler *sched, entity_t e,
                                  schedule::SystemBuilder::Deps deps) {
     auto view = sched->meta_world().entity(e);
@@ -379,7 +401,7 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
     if constexpr (takes_wv_cmd || takes_world_cmd) {
       view.add(SysCmdBuf{});
     }
-    view.add(SysExecutor{nullptr, effective_th, k});
+    view.add(SysExecutor{nullptr, effective_th, k, affinity});
     for (const auto &t : deps.afters)
       sched->add_dependency(name, t);
     for (const auto &t : deps.befores)
@@ -392,26 +414,28 @@ template <typename T> SystemBuilder &SystemBuilder::run() {
   return *this;
 }
 
-void SystemBuilder::build(elysia::Scheduler &sched) {
+inline void SystemBuilder::build(elysia::Scheduler &sched) {
   if (build_action_) {
     if (consumed_)
       throw std::logic_error("System callable has already been transferred");
     if (single_use_) consumed_ = true;
-    build_action_(&sched, sched.add_system_entity(name_), deps_);
+    auto entity = sched.add_system_entity(name_);
+    build_action_(&sched, entity, deps_);
+    sched.meta_world().entity(entity).get<SysExecutor>()->affinity = affinity_;
   } else if (kind_ == SpecialSystemKind::ApplyDeferred) {
     entity_t e = sched.add_system_entity(name_);
     sched.meta_world()
         .entity(e)
         .add(ApplyDeferredTag{})
         .add(SysExecutor{nullptr, ThreadingModel::Exclusive,
-                         SpecialSystemKind::ApplyDeferred});
+                         SpecialSystemKind::ApplyDeferred, affinity_});
     for (const auto &t : deps_.afters)
       sched.add_dependency(name_, t);
     for (const auto &t : deps_.befores)
       sched.add_dependency(t, name_);
   }
 }
-void SystemBuilder::build() {
+inline void SystemBuilder::build() {
   if (default_target_)
     build(*default_target_);
 }

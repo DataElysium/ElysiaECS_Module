@@ -30,6 +30,20 @@ template<typename T> struct Without { using type = T; };
 template<typename T> struct Include { using type = T; };
 struct IncludeInactive {};
 struct IncludeAll {};
+class MissingResourceError : public std::logic_error {
+public:
+    explicit MissingResourceError(std::string resource, std::string system = {})
+        : std::logic_error((system.empty() ? std::string{} : "System '" + system + "': ") +
+                           "required resource '" + resource + "' is missing"),
+          resource_name(std::move(resource)), system_name(std::move(system)) {}
+    std::string resource_name, system_name;
+};
+namespace detail {
+template<class T> T* checked_resource(T* pointer) {
+    if (!pointer) throw MissingResourceError(std::string(nameof::nameof_type<T>()));
+    return pointer;
+}
+}
 template<typename T> struct Res { 
     using type = T; 
     T& value;

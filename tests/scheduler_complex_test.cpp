@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <type_traits>
 
 import elysia;
 import elysia.query;
@@ -230,6 +231,119 @@ TYPED_TEST(ParallelSchedulerExceptions, SimultaneousFailuresPreserveOneOriginalE
         try { exec->run(&world); FAIL() << "Expected a worker exception"; }
         catch (int id) { EXPECT_TRUE(id == 0 || id == 1); }
         EXPECT_EQ(entered.load(), 2);
+    }
+}
+} // namespace
+
+namespace {
+struct AffinityRecord { std::thread::id expected; int calls = 0; };
+struct CallerFunctor {
+    void operator()(WorldView w) {
+        auto* record = w.resources().get<AffinityRecord>();
+        EXPECT_EQ(std::this_thread::get_id(), record->expected);
+        ++record->calls;
+    }
+};
+struct RequiredSettings { int value = 7; };
+struct DiagnosticPosition { int value = 0; };
+template<class Executor> class CallerAndDiagnostics : public ::testing::Test {};
+using CallerExecutors = ::testing::Types<SerialExecutor, TaskflowExecutor, ForkUnionExecutor>;
+TYPED_TEST_SUITE(CallerAndDiagnostics, CallerExecutors);
+
+TYPED_TEST(CallerAndDiagnostics, CallerAffinityPreservesDependenciesAndFollowsRunThread) {
+    World world;
+    world.resources().add(AffinityRecord{std::this_thread::get_id()});
+    Scheduler scheduler;
+    std::atomic<int> finished{0};
+    scheduler.system("Begin").on_caller_thread().run<CallerFunctor>().build();
+    for (int i = 0; i < 8; ++i) {
+        auto name = "Worker" + std::to_string(i);
+        scheduler.system(name).after("Begin").before("Join").run([&] {
+            if constexpr (std::is_same_v<TypeParam, TaskflowExecutor>)
+                EXPECT_NE(std::this_thread::get_id(), world.resources().get<AffinityRecord>()->expected);
+            ++finished;
+        }).build();
+    }
+    scheduler.system("Join").on_caller_thread().run([&] {
+        EXPECT_EQ(finished.load(), 8);
+        EXPECT_EQ(std::this_thread::get_id(), world.resources().get<AffinityRecord>()->expected);
+    }).build();
+    scheduler.system("AdjacentCaller").after("Join").run<CallerFunctor>().on_caller_thread().build();
+    scheduler.system("End").after("AdjacentCaller").on_caller_thread().run<CallerFunctor>().build();
+    auto graph = schedule::to_mermaid(scheduler.meta_world());
+    EXPECT_NE(graph.find("[caller thread]"), std::string::npos);
+    auto exec = TypeParam::build_from(scheduler);
+    exec->run(&world);
+    EXPECT_EQ(world.resources().get<AffinityRecord>()->calls, 3);
+    finished = 0;
+    std::thread another_caller([&] {
+        world.resources().get<AffinityRecord>()->expected = std::this_thread::get_id();
+        exec->run(&world);
+    });
+    another_caller.join();
+    EXPECT_EQ(world.resources().get<AffinityRecord>()->calls, 6);
+}
+
+TYPED_TEST(CallerAndDiagnostics, CallerFailureSkipsSuccessorsAndCanRunAgain) {
+    World world;
+    auto survivor = world.spawn().add(ExceptionValue{4}).entity;
+    Scheduler scheduler;
+    bool fail = true;
+    int downstream = 0;
+    scheduler.system("CallerFailure").on_caller_thread().run([&](WorldView, CommandBuffer* cmd) {
+        cmd->insert(survivor, ExceptionValue{99});
+        if (fail) throw 73;
+    }).build();
+    scheduler.system("Downstream").after("CallerFailure").run([&] { ++downstream; }).build();
+    auto exec = TypeParam::build_from(scheduler);
+    try { exec->run(&world); FAIL() << "Expected caller failure"; }
+    catch (int value) { EXPECT_EQ(value, 73); }
+    EXPECT_EQ(downstream, 0);
+    EXPECT_EQ(world.get_component<ExceptionValue>(survivor)->value, 4);
+    fail = false;
+    exec->run(&world);
+    EXPECT_EQ(downstream, 1);
+    EXPECT_EQ(world.get_component<ExceptionValue>(survivor)->value, 99);
+}
+
+TYPED_TEST(CallerAndDiagnostics, MissingResNamesResourceAndSystemForBothAdapters) {
+    for (bool each : {false, true}) {
+        World world;
+        world.spawn().add(DiagnosticPosition{});
+        Scheduler scheduler;
+        int calls = 0;
+        if (each) scheduler.system("NeedsSettings").run([&](DiagnosticPosition&, Res<RequiredSettings>) { ++calls; }).build();
+        else scheduler.system("NeedsSettings").run([&](Res<RequiredSettings>) { ++calls; }).build();
+        auto exec = TypeParam::build_from(scheduler);
+        try { exec->run(&world); FAIL() << "Expected missing resource"; }
+        catch (const MissingResourceError& error) {
+            EXPECT_EQ(error.system_name, "NeedsSettings");
+            EXPECT_NE(error.resource_name.find("RequiredSettings"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("NeedsSettings"), std::string::npos);
+        }
+        EXPECT_EQ(calls, 0);
+        world.resources().add(RequiredSettings{});
+        exec->run(&world);
+        EXPECT_EQ(calls, 1);
+    }
+}
+
+TEST(ScheduleDiagnosticDetails, MissingLabelsAndCyclesIdentifyConnections) {
+    Scheduler missing;
+    missing.system("Weapons.Fire").after("Misspelled.Target").run([] {}).build();
+    try { schedule::compile_dag(missing.meta_world(), {schedule::MissingLabelPolicy::Reject}); FAIL(); }
+    catch (const std::logic_error& error) {
+        EXPECT_NE(std::string(error.what()).find("Weapons.Fire"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("Misspelled.Target"), std::string::npos);
+    }
+    Scheduler cyclic;
+    cyclic.system("Alpha").after("Beta").run([] {}).build();
+    cyclic.system("Beta").after("Alpha").run([] {}).build();
+    try { schedule::compile_dag(cyclic.meta_world()); FAIL(); }
+    catch (const std::logic_error& error) {
+        EXPECT_NE(std::string(error.what()).find("Alpha"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("Beta"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find(" -> "), std::string::npos);
     }
 }
 } // namespace

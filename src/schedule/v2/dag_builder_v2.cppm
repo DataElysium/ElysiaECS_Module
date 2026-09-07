@@ -97,11 +97,49 @@ export namespace elysia::schedule {
                 auto* name = meta.get_component<SysName>(node.entity);
                 if (!missing.empty()) missing += ", ";
                 missing += name ? name->value : std::to_string(node.entity.id());
+                std::string connected;
+                for (size_t j = 0; j < logical.node_count(); ++j) {
+                    if (j == i) continue;
+                    bool linked = false;
+                    for (const auto& edge : logical.out_edges(j)) if (edge.to == i) linked = true;
+                    for (const auto& edge : logical.out_edges(i)) if (edge.to == j) linked = true;
+                    if (linked) {
+                        auto* neighbor = meta.get_component<SysName>(logical.key(j).entity);
+                        if (!connected.empty()) connected += ", ";
+                        connected += neighbor ? neighbor->value : std::to_string(j);
+                    }
+                }
+                if (!connected.empty()) missing += " (connected to: " + connected + ")";
             }
             if (!missing.empty()) throw std::logic_error("Unresolved schedule labels: " + missing);
         }
-        if (graph::algo::kahn_layers(logical).has_cycle)
-            throw std::logic_error("Schedule contains a dependency cycle");
+        if (graph::algo::kahn_layers(logical).has_cycle) {
+            std::vector<int> state(logical.node_count());
+            std::vector<size_t> path;
+            std::string cycle;
+            std::function<bool(size_t)> visit = [&](size_t i) {
+                state[i] = 1; path.push_back(i);
+                for (const auto& edge : logical.out_edges(i)) {
+                    if (state[edge.to] == 0 && visit(edge.to)) return true;
+                    if (state[edge.to] == 1) {
+                        bool recording = false;
+                        for (auto node : path) {
+                            if (node == edge.to) recording = true;
+                            if (!recording) continue;
+                            auto* name = meta.get_component<SysName>(logical.key(node).entity);
+                            if (!cycle.empty()) cycle += " -> ";
+                            cycle += name ? name->value : std::to_string(node);
+                        }
+                        auto* name = meta.get_component<SysName>(logical.key(edge.to).entity);
+                        cycle += " -> " + (name ? name->value : std::to_string(edge.to));
+                        return true;
+                    }
+                }
+                path.pop_back(); state[i] = 2; return false;
+            };
+            for (size_t i = 0; i < logical.node_count(); ++i) if (!state[i] && visit(i)) break;
+            throw std::logic_error("Schedule dependency cycle: " + cycle);
+        }
         if (!options.prune_empty_endpoints) return logical;
 
         const auto count = logical.node_count();
@@ -168,6 +206,7 @@ export namespace elysia::schedule {
                 if (auto* exec = meta.get_component<SysExecutor>(node.entity)) {
                     if (exec->kind == SpecialSystemKind::ApplyDeferred) { label += " [ApplyDeferred]"; style = "exclusive"; }
                     else if (exec->threading == ThreadingModel::Exclusive) { label += " [exclusive]"; style = "exclusive"; }
+                    if (exec->affinity == ThreadAffinity::Caller) label += " [caller thread]";
                 }
             }
             result += "  n" + std::to_string(i) + "[\"" + label + "\"]";

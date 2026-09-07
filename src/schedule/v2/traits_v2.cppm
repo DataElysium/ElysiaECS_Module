@@ -200,10 +200,7 @@ struct GlobalSystemAdapter {
                       else if constexpr (is_res_handle_v<DecayedT>) {
                         auto* ptr =
                             w->get_resource<typename DecayedT::type>();
-                        assert(ptr &&
-                               "Elysia Error: Requested Resource Not Found "
-                               "in World!");
-                        return DecayedT{*ptr};
+                        return DecayedT{*elysia::detail::checked_resource(ptr)};
                       }
                     })()...);
                 return invoke(std::get<Is>(args_tuple)...);

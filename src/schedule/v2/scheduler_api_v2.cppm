@@ -98,7 +98,7 @@ private:
                 entity_t e = sg.key(node_idx).entity;
                 auto view = sched.meta_world().entity(e);
                 if (auto* exec = view.get<schedule::SysExecutor>()) {
-                    if (exec->threading == schedule::ThreadingModel::Exclusive) wave.exclusive_systems.push_back(e);
+                    if (exec->threading == schedule::ThreadingModel::Exclusive || exec->affinity == schedule::ThreadAffinity::Caller) wave.exclusive_systems.push_back(e);
                     else wave.parallel_systems.push_back(e);
                 }
             }
@@ -119,7 +119,7 @@ private:
         auto* cmd_comp = view.get<schedule::SysCmdBuf>();
         void* cmd_ptr = cmd_comp ? cmd_comp->ptr.get() : nullptr;
         if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) flush_all_buffers(world);
-        else if (exec->func) exec->func(world, nullptr, cmd_ptr);
+        else if (exec->func) schedule::invoke_system(*exec, world, cmd_ptr, sched_->meta_world(), sys_e);
     }
 
     void flush_all_buffers(World* world) {
@@ -163,13 +163,13 @@ public:
                 } else if (exec->func) {
     #ifdef ELYSIA_PERF_OVERLAY
                     auto t0 = Clock::now();
-                    exec->func(world, nullptr, cmd_ptr);
+                    schedule::invoke_system(*exec, world, cmd_ptr, *meta_world_, e);
                     float ms = Ms(Clock::now() - t0).count();
                     const char* name = "";
                     if (auto* n = view.get<schedule::SysName>()) name = n->value.c_str();
                     sys_times_.push_back({name, ms});
     #else
-                    exec->func(world, nullptr, cmd_ptr);
+                    schedule::invoke_system(*exec, world, cmd_ptr, *meta_world_, e);
     #endif
                 }
             }
@@ -221,7 +221,10 @@ public:
 #endif
         try {
             // get waits for cancellation/running tasks and rethrows task failures.
-            executor_.run(taskflow_).get();
+            for (size_t i = 0; i < taskflows_.size(); ++i) {
+                if (taskflows_[i]->num_tasks()) executor_.run(*taskflows_[i]).get();
+                if (i < caller_systems_.size()) execute_system(caller_systems_[i]);
+            }
             flush_all_buffers(world);
         } catch (...) {
             current_world_ = nullptr;
@@ -233,80 +236,87 @@ public:
     struct SysTime { const char* name; float ms; };
     const std::vector<SysTime>& sys_times() const { return sys_times_; }
 private:
+    void execute_system(entity_t e) {
+        auto* w = current_world_;
+        auto view = meta_ptr_->entity(e);
+        auto* exec = view.get<schedule::SysExecutor>();
+        if (!exec) return;
+        if (auto* q = view.get<schedule::SysQuery>(); q && q->ptr)
+            w->update_query(*static_cast<QueryState*>(q->ptr.get()));
+        auto* cmd = view.get<schedule::SysCmdBuf>();
+#ifdef ELYSIA_PERF_OVERLAY
+        auto start = std::chrono::steady_clock::now();
+#endif
+        if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) flush_all_buffers(w);
+        else if (exec->func) schedule::invoke_system(*exec, w, cmd ? cmd->ptr.get() : nullptr, *meta_ptr_, e);
+#ifdef ELYSIA_PERF_OVERLAY
+        float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::lock_guard<std::mutex> lock(times_mtx_);
+        auto* name = view.get<schedule::SysName>();
+        sys_times_.push_back({name ? name->value.c_str() : "", ms});
+#endif
+    }
     void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
-        sched_ = &sched; meta_ptr_ = &sched.meta_world(); auto sg = schedule::compile_dag(*meta_ptr_, options); std::unordered_map<uint32_t, tf::Task> tasks;
+        sched_ = &sched; meta_ptr_ = &sched.meta_world();
+        auto sg = schedule::compile_dag(*meta_ptr_, options);
         auto order = graph::algo::kahn_layers(sg);
-        if (order.has_cycle) throw std::logic_error("Taskflow schedule contains a dependency cycle");
-        for (size_t i = 0; i < sg.node_count(); ++i) {
-            const auto& gn = sg.key(i);
-            tasks[i] = taskflow_.emplace([this, e = gn.entity]() {
-                auto* w = current_world_; auto view = meta_ptr_->entity(e); auto* exec = view.get<schedule::SysExecutor>(); if (!exec) return;
-                if (auto* q = view.get<schedule::SysQuery>(); q && q->ptr) w->update_query(*static_cast<QueryState*>(q->ptr.get()));
-                auto* cp_comp = view.get<schedule::SysCmdBuf>(); void* cp = cp_comp ? cp_comp->ptr.get() : nullptr;
-
-#ifdef ELYSIA_PERF_OVERLAY
-                using Clock = std::chrono::steady_clock;
-                using Ms    = std::chrono::duration<float, std::milli>;
-                auto t0 = Clock::now();
-#endif
-                if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) {
-                    flush_all_buffers(w);
-                } else if (exec->func) {
-                    exec->func(w, nullptr, cp);
-                }
-
-#ifdef ELYSIA_PERF_OVERLAY
-                float ms = Ms(Clock::now() - t0).count();
-                std::lock_guard<std::mutex> lock(times_mtx_);
-                const char* name = "";
-                if (auto* n = view.get<schedule::SysName>()) name = n->value.c_str();
-                sys_times_.push_back({name, ms});
-#endif
-            }).name(std::to_string(i));
-        }
-        // A valid topological order places unrelated work consistently around
-        // exclusive systems without imposing barriers between ordinary layers.
-        const auto count = sg.node_count();
-        std::vector<std::vector<size_t>> sections(1);
-        std::vector<size_t> barriers;
-        std::vector<size_t> section_of(count, count + 1);
+        taskflows_.clear(); caller_systems_.clear();
+        std::vector<std::vector<size_t>> runs(1);
+        // Caller nodes are explicit join points. They never enter a worker taskflow.
         for (auto i : order.nodes_sorted) {
             auto* exec = meta_ptr_->entity(sg.key(i).entity).get<schedule::SysExecutor>();
-            if (exec && (exec->threading == schedule::ThreadingModel::Exclusive ||
-                         exec->kind == schedule::SpecialSystemKind::ApplyDeferred)) {
-                barriers.push_back(i);
-                sections.emplace_back();
-            } else {
-                section_of[i] = sections.size() - 1;
-                sections.back().push_back(i);
-            }
+            if (exec && exec->affinity == schedule::ThreadAffinity::Caller) {
+                caller_systems_.push_back(sg.key(i).entity);
+                runs.emplace_back();
+            } else runs.back().push_back(i);
         }
-
-        // Cross-section edges are implied by the exclusive boundaries. Keep
-        // internal edges and connect only each section's roots and sinks.
-        std::vector<bool> has_predecessor(count), has_successor(count);
-        for (size_t i = 0; i < count; ++i) {
-            if (section_of[i] == count + 1) continue;
-            for (const auto& edge : sg.out_edges(i)) {
-                if (section_of[i] != section_of[edge.to]) continue;
-                tasks[i].precede(tasks[edge.to]);
-                has_successor[i] = has_predecessor[edge.to] = true;
+        for (const auto& run : runs) {
+            auto flow = std::make_unique<tf::Taskflow>();
+            std::unordered_map<size_t, tf::Task> tasks;
+            for (auto i : run) {
+                auto e = sg.key(i).entity;
+                auto* name = meta_ptr_->entity(e).get<schedule::SysName>();
+                tasks[i] = flow->emplace([this, e] { execute_system(e); }).name(name ? name->value : std::to_string(i));
             }
-        }
-        for (size_t s = 0; s < sections.size(); ++s) {
-            if (sections[s].empty() && s > 0 && s < barriers.size())
-                tasks[barriers[s - 1]].precede(tasks[barriers[s]]);
-            for (auto i : sections[s]) {
-                if (s > 0 && !has_predecessor[i])
-                    tasks[barriers[s - 1]].precede(tasks[i]);
-                if (s < barriers.size() && !has_successor[i])
-                    tasks[i].precede(tasks[barriers[s]]);
+            // Preserve ordinary DAG concurrency and exclusive boundaries within each run.
+            const auto count = sg.node_count();
+            std::vector<std::vector<size_t>> sections(1);
+            std::vector<size_t> barriers, section_of(count, count + 1);
+            for (auto i : run) {
+                auto* exec = meta_ptr_->entity(sg.key(i).entity).get<schedule::SysExecutor>();
+                if (exec && (exec->threading == schedule::ThreadingModel::Exclusive ||
+                             exec->kind == schedule::SpecialSystemKind::ApplyDeferred)) {
+                    barriers.push_back(i); sections.emplace_back();
+                } else {
+                    section_of[i] = sections.size() - 1;
+                    sections.back().push_back(i);
+                }
             }
+            std::vector<bool> has_predecessor(count), has_successor(count);
+            for (auto i : run) {
+                if (section_of[i] == count + 1) continue;
+                for (const auto& edge : sg.out_edges(i)) {
+                    if (section_of[i] != section_of[edge.to]) continue;
+                    tasks.at(i).precede(tasks.at(edge.to));
+                    has_successor[i] = has_predecessor[edge.to] = true;
+                }
+            }
+            for (size_t section = 0; section < sections.size(); ++section) {
+                if (sections[section].empty() && section > 0 && section < barriers.size())
+                    tasks.at(barriers[section - 1]).precede(tasks.at(barriers[section]));
+                for (auto i : sections[section]) {
+                    if (section > 0 && !has_predecessor[i]) tasks.at(barriers[section - 1]).precede(tasks.at(i));
+                    if (section < barriers.size() && !has_successor[i]) tasks.at(i).precede(tasks.at(barriers[section]));
+                }
+            }
+            taskflows_.push_back(std::move(flow));
         }
     }
     void flush_all_buffers(World* world) { meta_ptr_->query<schedule::SysCmdBuf>().each([&](auto& c) { if (c.ptr && !c.ptr->headers().empty()) { world->submit(*c.ptr); c.ptr->clear(); } }); }
     ScheduleRuntime* sched_ = nullptr;
-    tf::Executor executor_; tf::Taskflow taskflow_; World* current_world_ = nullptr; World* meta_ptr_ = nullptr; World* bound_world_ = nullptr;
+    tf::Executor executor_;
+    std::vector<std::unique_ptr<tf::Taskflow>> taskflows_;
+    std::vector<entity_t> caller_systems_; World* current_world_ = nullptr; World* meta_ptr_ = nullptr; World* bound_world_ = nullptr;
     std::vector<SysTime> sys_times_;
     std::mutex times_mtx_;
 };

@@ -275,3 +275,43 @@ registering a previously missing system afterward affects only a newly compiled
 runtime. The old runtime keeps its original behavior. Rebuilding from the scheduler
 creates fresh runtime system state; this is not live state migration. Changes to
 an already running plan are not supported.
+
+### Caller-thread systems and resource diagnostics
+
+Use `.on_caller_thread()` when a system must execute on the thread invoking
+`executor.run(&world)`, for example the thread that owns a graphics context:
+
+```cpp
+scheduler.system("Render.Present")
+    .after("Simulation.Update")
+    .on_caller_thread()
+    .run(render)
+    .build();
+```
+
+This is a separate requirement from `.exclusive()`: exclusivity prevents overlap;
+caller affinity chooses the execution thread. It does not select a process-wide
+"main thread". The application must invoke `run()` on the required thread.
+Serial, ForkUnion, and Taskflow executors all honor caller affinity, including
+when later sequential runs originate on a different thread. Caller nodes currently
+act as synchronization boundaries. Taskflow joins the preceding worker graph,
+executes the caller node directly, then dispatches the next graph; ordinary work
+within each graph retains its DAG concurrency. No-caller schedules retain their
+existing dependency/exclusive-boundary behavior. Factory initialization occurs on
+the initializing caller as before; affinity applies to system invocation.
+
+Mermaid exports label these systems with `[caller thread]`. Caller failures follow
+the same propagation and deferred-command cleanup rules as worker failures.
+
+`Res<T>` remains the injection API for both resource-only functions and component
+functions. Missing resources throw `MissingResourceError` in debug and release
+builds before invoking the function, with `resource_name` and `system_name` fields:
+
+```text
+System 'Weapons.Fire': required resource 'Settings' is missing
+```
+
+Direct query use reports the resource type without a system name. Other exception
+types are propagated unchanged. Strict missing-label compilation identifies the
+missing label and its connected labels; cycle errors include a concrete label path.
+The existing Fill/Reject policy and unresolved-slot graph representation are unchanged.
