@@ -21,6 +21,18 @@ export namespace elysia::archive {
 using ::elysia::archive::SnapshotRegistry;
 }
 export namespace elysia::prefab {
+using ::elysia::prefab::NativeEntityMap;
+using ::elysia::prefab::NativeComponentFunctions;
+using ::elysia::prefab::NativeCloneRegistry;
+using ::elysia::prefab::NativePrefabFunctions;
+using ::elysia::prefab::NativeInstance;
+using ::elysia::prefab::NativePrefab;
+using ::elysia::prefab::register_native_clone;
+using ::elysia::prefab::native_parameters;
+using ::elysia::prefab::prepare_native_prefab;
+using ::elysia::prefab::spawn_native;
+using ::elysia::prefab::spawn_native_batch;
+
 using ::elysia::prefab::Value;
 using ::elysia::prefab::Object;
 using ::elysia::prefab::Array;

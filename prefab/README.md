@@ -227,3 +227,71 @@ to that arrangement is a separate migration.
 
 The fixtures and compatibility helper exercise the existing Rust implementation;
 they are not a claim of automatic checkpoint interchange between different solvers.
+
+### Native templates and typed batch spawning
+
+Include `elysia/prefab/native.hpp` for a native-only path; it has no archive,
+reflection, JSON, or file-format dependency. Build an ordinary authoring world,
+using the hierarchy API for its tree, then prepare an owned snapshot:
+
+```cpp
+struct ShipParams { int armor; };
+void patch_ship(elysia::World& world, std::span<const elysia::Entity> slots,
+                const ShipParams& params) {
+    world.get_component<Hull>(slots[0])->armor = params.armor;
+}
+
+elysia::prefab::NativeCloneRegistry clones;
+elysia::prefab::register_native_clone<Hull>(clones);
+auto prefab = elysia::prefab::prepare_native_prefab(
+    "ship", authoring_world, hull_entity, clones,
+    elysia::prefab::native_parameters<ShipParams, patch_ship>());
+
+std::array<ShipParams, 2> parameters{{{100}, {200}}};
+auto instances = elysia::prefab::spawn_native_batch(
+    destination, prefab, std::span<const ShipParams>(parameters));
+```
+
+`NativeComponentFunctions` contains a nullable clone function pointer.
+`register_native_clone<T>` supplies copy construction; a custom callback can
+clone move-only components. Components containing entity references must register
+their own remapper, for example:
+
+```cpp
+void remap_turret(Turret& turret, const elysia::prefab::NativeEntityMap& map) {
+    turret.hull = map.resolve(turret.hull);
+}
+elysia::prefab::register_native_clone<Turret, remap_turret>(clones);
+```
+
+The remapper runs on the copy before insertion. All destination entity IDs already
+exist at that point, although their components may still be under construction.
+Null references stay null; `resolve` rejects references outside the template tree.
+Cross-world external references require an explicitly designed custom clone policy.
+
+`NativePrefabFunctions` contains an optional patch function pointer and its
+parameter type ID. Omit it for parameterless spawning with `spawn_native` or
+`spawn_native_batch(world, prefab, count)`. Typed calls validate the parameter type
+before spawning. Slots follow breadth-first hierarchy order, root first; they are
+stable within a prepared snapshot, not identifiers for matching independently
+authored files.
+
+Preparation validates clone coverage, copies component values into a private
+world, remaps references, and caches traversal and clone callbacks. The authoring
+world and clone registry may subsequently change or be destroyed. The snapshot
+does not retain pointers into either; callback code and any external resources
+used by custom clones must remain available. Default copy semantics apply to
+shared pointers and other shared resources. Custom callbacks should not mutate
+their source.
+
+Hierarchy components are rebuilt through the hierarchy plugin rather than copied.
+Patching runs after the hierarchy is complete. Patches should modify the new
+instance's values through ECS APIs and leave its entity membership unchanged.
+If cloning or patching throws, created entities are removed; a failed batch removes
+its earlier instances too. This cannot undo arbitrary callback side effects on
+resources or other entities; removal observers must not throw during cleanup.
+
+This is the native foundation: named file overrides, compatibility matching, and
+Generic-to-typed parameter decoding are not yet connected to this path. Batch
+spawning currently repeats the prepared native plan; it does not yet allocate or
+copy whole archetype columns in bulk.

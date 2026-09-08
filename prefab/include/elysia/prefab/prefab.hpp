@@ -4,3 +4,4 @@
 #include "instantiate.hpp"
 #include "bind.hpp"
 #include "patch.hpp"
+#include "native.hpp"
