@@ -53,8 +53,7 @@ struct InductorInput { double henries; };
 elysia::archive::SnapshotRegistry case_types;
 case_types.register_type<InductorInput>("electrical::Inductor");
 
-elysia::prefab::ComponentRegistry components(case_types);
-elysia::prefab::PrefabRegistry prefabs(std::move(components));
+elysia::prefab::PrefabRegistry prefabs(case_types);
 prefabs.load_library(elysia::prefab::read_library(
     elysia::prefab::parse_json(R"({
       "electrical::branch": {
@@ -83,8 +82,37 @@ to the native full name only when the application supplies no registration name.
 
 Prefabs and component names use separate symbol tables. Prefab `Use` lookup is
 qualified exact, current prefab namespace, then global. No compiler namespace is
-automatically imported. Registry snapshots are copied into `ComponentRegistry`;
-changes to the original registry do not silently change the loaded contract.
+automatically imported. `PrefabRegistry(registry)` borrows an application-owned `SnapshotRegistry`.
+Archive operations and multiple prefab libraries can use the same instance:
+
+```cpp
+elysia::archive::SnapshotRegistry archive;
+elysia::prefab::PrefabRegistry game_prefabs(archive);
+elysia::prefab::PrefabRegistry editor_prefabs(archive);
+
+// Both libraries see registrations added after construction.
+archive.register_type<InductorInput>("electrical::Inductor");
+
+// Registration through prefab also updates that same archive.
+game_prefabs.components().register_type<Transform>();
+auto& shared_archive = game_prefabs.archive_registry(); // same object as archive
+```
+
+The borrowed archive must outlive every prefab library/view using it. Construction
+adds any missing prefab builtin codecs to that archive. No global registry is used.
+A default-constructed `ComponentRegistry` owns its storage; copying it shares that
+storage, so passing it to multiple prefab libraries does not copy the registrations.
+Moving a `SnapshotRegistry` into `ComponentRegistry` explicitly transfers ownership.
+For isolation, copy the archive explicitly before passing it in.
+
+Scoped lookup reads the current archive factories directly. There is no duplicated
+name table to synchronize; later additions, renames, and conflicting names are
+visible on the next lookup. This currently scans the registered component types
+at authoring/instantiation time; it adds no lookup to running ECS systems.
+Register or replace codecs only between prefab/archive operations, never during
+active decoding (including inside a decoder or observer). Existing template-world
+values are not retroactively rebuilt by registration changes; reload the library
+when its typed template view must reflect a changed codec.
 
 ## Supported data behavior
 

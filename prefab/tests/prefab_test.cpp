@@ -61,12 +61,12 @@ TEST(Prefab, NativeIdsAndScopedNamesAreIndependent) {
     EXPECT_THROW(registry.resolve("Inductor", {.imports={"electrical", "other"}}), p::Error);
     EXPECT_EQ(registry.resolve("L", {.aliases={{"L", "electrical::Inductor"}}}).key, "electrical::Inductor");
     EXPECT_THROW(registry.register_type<Pair>("electrical::Inductor"), p::Error);
-    p::NameTable names;
-    names.add("R", 1);
-    names.add("circuit::R", 2);
-    EXPECT_EQ(names.id("R", {.imports={"circuit"}}), 2);
-    EXPECT_EQ(names.id("R", {.aliases={{"R", "circuit::R"}}}), 2);
-    EXPECT_EQ(names.id("::R", {.imports={"circuit"}}), 1);
+    p::ComponentRegistry names;
+    names.register_type<Resistance>("R");
+    names.register_type<OtherResistance>("circuit::R");
+    EXPECT_EQ(names.resolve("R", {.imports={"circuit"}}).type_id, elysia::TypeTraits<OtherResistance>::id);
+    EXPECT_EQ(names.resolve("R", {.aliases={{"R", "circuit::R"}}}).type_id, elysia::TypeTraits<OtherResistance>::id);
+    EXPECT_EQ(names.resolve("::R", {.imports={"circuit"}}).type_id, elysia::TypeTraits<Resistance>::id);
 }
 TEST(Prefab, ComponentRegistryUsesExternallySelectedArchive) {
     elysia::archive::SnapshotRegistry cases;
@@ -77,6 +77,59 @@ TEST(Prefab, ComponentRegistryUsesExternallySelectedArchive) {
     p::ComponentRegistry components(cases);
     EXPECT_EQ(components.resolve("case::R").type_id, elysia::TypeTraits<Resistance>::id);
     EXPECT_THROW(components.resolve(std::string(elysia::TypeTraits<RuntimeHistory>::name())), p::Error);
+}
+TEST(Prefab, ArchiveRegistrationIsSharedAcrossLibrariesAndWorlds) {
+    elysia::archive::SnapshotRegistry archive;
+    p::PrefabRegistry first(archive);
+    p::PrefabRegistry second(archive);
+    EXPECT_EQ(&first.archive_registry(), &archive);
+    EXPECT_EQ(&second.archive_registry(), &archive);
+
+    // Direct archive registration after constructing both prefab libraries is visible.
+    archive.register_type<Pair>("case::Pair");
+    auto definitions = library(R"({"case::item":{"body":[{"id":0,"components":{"Pair":{"a":3,"b":7}}}]}})");
+    first.load_library(definitions);
+    second.load_library(definitions);
+    elysia::World first_world;
+    elysia::World second_world;
+    auto a = first.spawn_class(first_world, "case::item").roots.at(0);
+    auto b = second.spawn_class(second_world, "case::item").roots.at(0);
+    ASSERT_NE(first_world.get_component<Pair>(a), nullptr);
+    ASSERT_NE(second_world.get_component<Pair>(b), nullptr);
+    EXPECT_EQ(first_world.get_component<Pair>(a)->b, 7);
+    EXPECT_EQ(second_world.get_component<Pair>(b)->b, 7);
+
+    // Registration through prefab is available to ordinary archive callers too.
+    first.components().register_type<Resistance>("case::R");
+    ASSERT_NE(archive.find("case::R"), nullptr);
+    EXPECT_EQ(second.components().resolve("case::R").type_id, elysia::TypeTraits<Resistance>::id);
+    auto json = archive.find("case::Pair")->generic->to_generic(first_world.get_component<Pair>(a));
+    EXPECT_EQ(p::detail::required(p::detail::object(json), "b").to_int64().value(), 7);
+}
+TEST(Prefab, CopiedOwnedRegistryKeepsSharedStorageAlive) {
+    auto make_library = [] {
+        p::ComponentRegistry components;
+        p::PrefabRegistry prefabs(components);
+        components.register_type<Pair>("Pair");
+        return prefabs;
+    };
+    auto prefabs = make_library();
+    EXPECT_EQ(prefabs.components().resolve("Pair").type_id, elysia::TypeTraits<Pair>::id);
+    prefabs.load_library(library(R"({"item":{"body":[{"id":0,"components":{"Pair":{"a":1,"b":2}}}]}})"));
+    elysia::World world;
+    auto entity = prefabs.spawn_class(world, "item").roots.at(0);
+    ASSERT_NE(world.get_component<Pair>(entity), nullptr);
+    EXPECT_EQ(world.get_component<Pair>(entity)->a, 1);
+}
+TEST(Prefab, ExternalRegistryChangesDoNotLeaveStaleNames) {
+    elysia::archive::SnapshotRegistry archive;
+    archive.register_type<Resistance>("old::R");
+    p::ComponentRegistry components(archive);
+    archive.register_type<Resistance>("new::R");
+    EXPECT_THROW(components.resolve("old::R"), p::Error);
+    EXPECT_EQ(components.resolve("new::R").type_id, elysia::TypeTraits<Resistance>::id);
+    archive.register_type<OtherResistance>("new::R");
+    EXPECT_THROW(components.resolve("new::R"), p::Error);
 }
 TEST(Prefab, CircuitStructuredParametersAndGlobals) {
     p::ComponentRegistry components;

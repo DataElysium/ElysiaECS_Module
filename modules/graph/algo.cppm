@@ -75,6 +75,7 @@ template <typename G> SCCFlatResult tarjan_scc(const G &graph) {
 
     for (const auto &edge : graph.out_edges(u)) {
       size_t v = edge.to;
+      if (v == u) res.has_cycle = true;
       if (dfn[v] == -1) {
         self(self, v);
         low[u] = std::min(low[u], low[v]);
@@ -146,7 +147,7 @@ struct KahnResult {
   std::vector<std::size_t> nodes_sorted;
 
   // 存储每层结束的位置 (相当于 CSR 的 indptr)
-  std::vector<std::size_t> layer_offsets;
+  std::vector<std::size_t> layer_offsets{0};
 
   bool has_cycle = false;
 
@@ -180,7 +181,7 @@ struct KahnResult {
 
     // 比较操作符 (用于判断是否到达 end())
     bool operator==(const LayerIterator &other) const {
-      return current_layer_index == other.current_layer_index;
+      return result == other.result && current_layer_index == other.current_layer_index;
     }
     bool operator!=(const LayerIterator &other) const {
       return !(*this == other);
@@ -225,14 +226,14 @@ template <typename G> KahnResult kahn_layers(const G &graph) {
   }
 
   KahnResult res;
-  res.layer_offsets.push_back(0); //  ~！Layer 0 起始于 nodes_sorted[0]
+  res.nodes_sorted.reserve(n); //  ~！Layer 0 起始于 nodes_sorted[0]
   size_t processed_count = 0;
 
   while (!q.empty()) {
     size_t layer_size = q.size();
 
     // ✨ 优化：提前为当前层的节点预留空间，避免 realloc
-    res.nodes_sorted.reserve(res.nodes_sorted.size() + layer_size);
+
 
     // 3. 处理当前层的所有节点
     for (size_t i = 0; i < layer_size; ++i) {

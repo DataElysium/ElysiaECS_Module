@@ -22,7 +22,6 @@ using ::elysia::prefab::Library;
 using ::elysia::prefab::Instance;
 using ::elysia::prefab::Document;
 using ::elysia::prefab::LookupScope;
-using ::elysia::prefab::NameTable;
 using ::elysia::prefab::ComponentRegistry;
 using ::elysia::prefab::PrefabRegistry;
 using ::elysia::prefab::Spawned;
