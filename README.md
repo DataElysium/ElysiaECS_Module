@@ -149,3 +149,42 @@ external map owned by a single host resource; they are not exposed through
 `Res<T>`. No `World` APIs or core lifecycle metadata are changed. The plugin
 namespace models a plugin boundary in one executable; this is not a DLL loader
 or a C ABI.
+
+
+### Application runner
+
+`update()` executes one schedule step. `run()` invokes the configured runner;
+without one, it calls `update()` once and returns. A plugin can install a runner
+through the same API:
+
+```cpp
+struct FixedStepsRunner {
+    int steps;
+    void build(elysia::App& app) const {
+        app.set_runner([count = steps](elysia::App& active) {
+            for (int i = 0; i < count; ++i) active.update();
+        });
+    }
+};
+
+elysia::App app;
+// Register resources and systems here.
+app.add_plugin(FixedStepsRunner{60});
+app.run();
+```
+
+The runner is an owned `std::function<void(App&)>`: copyable captures and plain
+functions work, and mutable callback state persists between `run()` calls.
+`set_runner({})` restores the default. `run()` does not initialize eagerly; the
+runner may choose `init_parallel()`, call `update()` (which initializes serially
+on first use), or return without any updates. Startup retains its once-per-App
+behavior. Exceptions propagate; the running guard is reset during unwinding.
+Recursive `run()` and replacing an active runner throw `std::logic_error`.
+Access to an App still requires external synchronization.
+
+For a DLL-hosted application, the host can either provide the loop via a runner
+or retain loop ownership and call `update()` through its own exported adapter.
+The runner adds no DLL loader or stable C ABI. Its callback and captures must be
+destroyed or cleared before unloading their defining library; do so after the
+runner returns. Other plugin-owned systems and resources have their own lifetime
+requirements as well.

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 #include <thread>
+#include <stdexcept>
 
 import elysia;
 
@@ -108,6 +109,79 @@ TEST(ElysiaApp, KeepsRuntimeWhenChangingExecutors) {
     app.update();
     EXPECT_EQ(observed, 3);
     EXPECT_EQ(last_thread, std::this_thread::get_id());
+}
+
+
+TEST(ElysiaApp, DefaultRunnerUpdatesOnce) {
+    App app;
+    int startup = 0, updates = 0;
+    app.add_startup_system("Startup", [&](World*) { ++startup; });
+    app.system("Tick").run([&](World*) { ++updates; }).build();
+    app.run();
+    app.run();
+    EXPECT_EQ(startup, 1);
+    EXPECT_EQ(updates, 2);
+}
+
+TEST(ElysiaApp, PluginRunnerControlsLoopAndKeepsState) {
+    struct LoopPlugin {
+        void build(App& app) const {
+            app.set_runner([calls = 0](App& active) mutable {
+                for (int i = 0, count = ++calls; i < count; ++i) active.update();
+            });
+        }
+    };
+    App app;
+    int updates = 0;
+    app.system("Tick").run([&](World*) { ++updates; }).build();
+    app.add_plugin(LoopPlugin{});
+    app.run();
+    app.run();
+    EXPECT_EQ(updates, 3);
+    app.set_runner({});
+    app.run();
+    EXPECT_EQ(updates, 4);
+}
+
+TEST(ElysiaApp, RunnerCanReturnWithoutInitializingOrUpdating) {
+    App app;
+    int startup = 0;
+    app.add_startup_system("Startup", [&](World*) { ++startup; });
+    app.set_runner([&](App& active) { EXPECT_EQ(&active, &app); });
+    app.run();
+    EXPECT_EQ(startup, 0);
+    app.update(); // An external host can still drive the app directly.
+    EXPECT_EQ(startup, 1);
+}
+
+TEST(ElysiaApp, RunnerGuardsReentryAndPropagatesExceptions) {
+    App app;
+    app.set_runner([](App& active) {
+        EXPECT_THROW(active.run(), std::logic_error);
+        EXPECT_THROW(active.set_runner({}), std::logic_error);
+        throw std::runtime_error("Loop failed");
+    });
+    EXPECT_THROW(app.run(), std::runtime_error);
+    int called = 0;
+    EXPECT_NO_THROW(app.set_runner([&](App&) { ++called; }));
+    app.run();
+    EXPECT_EQ(called, 1);
+}
+
+TEST(ElysiaApp, RunnerPreservesSelectedExecutorAndStartupLifecycle) {
+    App app;
+    int startup = 0, updates = 0;
+    app.add_startup_system("Startup", [&](World*) { ++startup; });
+    app.system("Tick").run([&](World*) { ++updates; }).build();
+    app.set_runner([](App& active) {
+        active.init_parallel();
+        active.update();
+        active.init_serial();
+        active.update();
+    });
+    app.run();
+    EXPECT_EQ(startup, 1);
+    EXPECT_EQ(updates, 2);
 }
 
 } // namespace elysia_test::elysia_app_test

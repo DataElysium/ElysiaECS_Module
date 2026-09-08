@@ -295,3 +295,26 @@ This is the native foundation: named file overrides, compatibility matching, and
 Generic-to-typed parameter decoding are not yet connected to this path. Batch
 spawning currently repeats the prepared native plan; it does not yet allocate or
 copy whole archetype columns in bulk.
+
+
+### JSON battleship to native template
+
+Run `xmake build -P . prefab_battleship` then
+`xmake run -P . prefab_battleship` from this prefab directory.
+An optional first argument selects another JSON file.
+
+`fixtures/battleship.json` defines an 11-entity tree: hull, three turret mounts
+with triple 410 mm batteries, two Gatling mounts, radar, and engine.
+`examples/battleship_model.hpp` registers the component decoders and native clone
+callbacks. It loads the file, expands its default parameters, binds references,
+and prepares an owned native snapshot. The source registry and authoring world
+are destroyed before batch spawning.
+
+The example spawns Resolute and Vanguard with typed callsign/faction/position
+parameters. Clone callbacks remap both `Bound` references and `PrefabEntityId`
+instance identities. Hierarchy is rebuilt by the native spawner. Repeated spawning
+does not parse JSON or resolve symbolic references again.
+
+This example explicitly prepares the loaded tree; it does not automatically
+match a file to a separately registered native definition by name. It demonstrates
+the loading/spawning boundary without changing PolarAegis gameplay or rendering.
