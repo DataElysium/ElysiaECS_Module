@@ -32,8 +32,7 @@ inline Result<void> load_from_columnar(World& world, CommandBuffer& cmd, const S
     
     if (res.data) {
         // Path A: From structured manifest data
-        auto col_json = reflect::write_json(*res.data);
-        auto res_parse = reflect::read_json<ArchetypeColumnar>(col_json);
+        auto res_parse = reflect::from_generic<ArchetypeColumnar>(*res.data);
         if (res_parse) col_data = *res_parse;
     } else if (res.blob) {
         // Path B: From binary blob (using base64/raw decoding provided by middleware)
@@ -71,8 +70,7 @@ inline Result<void> load_from_columnar(World& world, CommandBuffer& cmd, const S
                              const IDRemapRegistry& id_reg, const IDMapper& mapper) {
     std::optional<ArchetypeColumnar> col_data;
     if (res.data) {
-        auto col_json = reflect::write_json(*res.data);
-        auto res_parse = reflect::read_json<ArchetypeColumnar>(col_json);
+        auto res_parse = reflect::from_generic<ArchetypeColumnar>(*res.data);
         if (res_parse) col_data = *res_parse;
     } else if (res.blob) {
         std::string decoded = base64_decode(*res.blob);

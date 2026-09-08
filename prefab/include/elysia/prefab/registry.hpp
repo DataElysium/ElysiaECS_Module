@@ -175,17 +175,17 @@ class ComponentRegistry {
         archive::GenericCodec codec;
         codec.to_generic = [](const void *ptr) {
             const auto &[value] = *static_cast<const T *>(ptr);
-            return parse_json(reflect::write_json(value));
+            return reflect::to_generic(value);
         };
         codec.from_generic = [](World &world, Entity e, const Value &value) {
-            auto parsed = reflect::read_json<Wire>(reflect::write_json(value));
+            auto parsed = reflect::from_generic<Wire>(value);
             if (!parsed)
                 return Result<void>::err(ErrorCode::InvalidOperation, "Invalid prefab builtin");
             world.entity(e).add(T{std::move(*parsed)});
             return Result<void>::ok();
         };
         codec.from_generic_cmd = [](CommandBuffer &cmd, Entity e, const Value &value) {
-            auto parsed = reflect::read_json<Wire>(reflect::write_json(value));
+            auto parsed = reflect::from_generic<Wire>(value);
             if (!parsed)
                 return Result<void>::err(ErrorCode::InvalidOperation, "Invalid prefab builtin");
             cmd.insert(e, T{std::move(*parsed)});

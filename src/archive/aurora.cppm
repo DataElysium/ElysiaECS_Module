@@ -97,9 +97,7 @@ WorldArchive AuroraArchive::create(World& world, const SnapshotRegistry& reg, Co
             auto col_data = export_archetype_to_columnar(*arch, active);
             re.format = "columnar"; 
             re.encoding = "raw"; 
-            auto json = reflect::write_json(col_data);
-            auto generic_opt = reflect::read_json<reflect::Generic>(json);
-            if (generic_opt) re.data = *generic_opt;
+            re.data = reflect::to_generic(col_data);
         }
         archive.embed[res_name] = std::move(re);
         archive.archetypes.push_back(std::move(blob_def));

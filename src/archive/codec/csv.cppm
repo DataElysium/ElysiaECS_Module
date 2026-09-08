@@ -41,8 +41,7 @@ namespace detail {
     }
 
     inline void flatten_top_level(const std::string& prefix, const reflect::Generic& g, std::map<std::string, std::string>& out) {
-        auto json = reflect::write_json(g);
-        auto map_res = reflect::read_json<std::map<std::string, reflect::Generic>>(json);
+        auto map_res = reflect::from_generic<std::map<std::string, reflect::Generic>>(g);
         if (map_res) {
             for (const auto& [k, v] : *map_res) {
                 std::string v_str = reflect::write_json(v);

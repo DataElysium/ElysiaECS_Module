@@ -7,12 +7,17 @@ module;
 #include <rfl/capnproto.hpp>
 #endif
 #include <rfl/Generic.hpp>
+#include <rfl/to_generic.hpp>
+#include <rfl/from_generic.hpp>
 #include <string> 
 
 export module elysia.reflect_wrapper;
 
 export namespace elysia::reflect {
     using Generic = rfl::Generic;
+
+    template<typename T> inline Generic to_generic(const T& obj) { return rfl::to_generic(obj); }
+    template<typename T> inline auto from_generic(const Generic& value) { return rfl::from_generic<T>(value); }
 
     // JSON
     template<typename T> std::string write_json(const T& obj) { return rfl::json::write(obj); }
