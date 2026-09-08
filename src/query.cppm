@@ -1,5 +1,8 @@
 module;
 #include <cassert>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -73,6 +76,157 @@ struct QueryState {
     else
       external_withs.push_back(info);
   }
+};
+
+// Runtime descriptors contain IDs only; no reflection or native component type is required.
+struct DynamicQueryDesc {
+    std::vector<uint64_t> columns;
+    std::vector<uint64_t> with;
+    std::vector<uint64_t> without;
+    bool include_inactive = false;
+};
+
+struct DynamicColumnView {
+    uint64_t id;
+    void* data;
+    size_t stride;
+    size_t alignment;
+};
+struct DynamicChunkView {
+    std::span<const Entity> entities;
+    std::span<const DynamicColumnView> columns;
+};
+
+class DynamicQuery : public QueryState {
+public:
+    explicit DynamicQuery(DynamicQueryDesc descriptor = {}) : descriptor_(std::move(descriptor)) {
+        for (size_t i = 0; i < descriptor_.columns.size(); ++i)
+            if (std::find(descriptor_.columns.begin(), descriptor_.columns.begin() + i,
+                          descriptor_.columns[i]) != descriptor_.columns.begin() + i)
+                throw std::invalid_argument("Dynamic query has duplicate column id " +
+                                            std::to_string(descriptor_.columns[i]));
+        for (uint64_t id : descriptor_.without)
+            if (mentions(descriptor_.columns, id) || mentions(descriptor_.with, id))
+                throw std::invalid_argument("Dynamic query both requires and excludes component id " +
+                                            std::to_string(id));
+        prepare_ptr = [](QueryState* state, ComponentRegistry& registry) {
+            static_cast<DynamicQuery*>(state)->prepare_impl(registry);
+        };
+        update_arch_ptr = [](QueryState* state, Archetype<DefaultConfig>* arch) {
+            static_cast<DynamicQuery*>(state)->update_archetype_impl(arch);
+        };
+    }
+
+    const DynamicQueryDesc& descriptor() const { return descriptor_; }
+    // Also use reset after moving/replacing the world, or changing inherited external filters.
+    void reset() {
+        is_prepared = false;
+        registry_ = nullptr;
+        scanned_count = 0;
+        matched_archetypes.clear();
+        column_indices.clear();
+        column_types_.clear();
+        with_mask = SignatureBuffer<>{};
+        without_mask = SignatureBuffer<>{};
+    }
+
+    // Call world.update_query(query) before iteration. Views are borrowed for the callback.
+    // Structural mutation during iteration is unsupported, just as for typed queries.
+    void each_chunk(void (*visitor)(void*, const DynamicChunkView&), void* context) const {
+        if (!visitor) throw std::invalid_argument("Null dynamic query visitor");
+        if (!is_prepared) throw std::logic_error("Dynamic query must be updated before iteration");
+        std::vector<DynamicColumnView> columns(column_types_.size());
+        for (size_t a = 0; a < matched_archetypes.size(); ++a) {
+            for (const auto& chunk : matched_archetypes[a]->table().chunks()) {
+                if (chunk->count() == 0) continue;
+                for (size_t c = 0; c < columns.size(); ++c)
+                    columns[c] = {column_types_[c]->id,
+                                  chunk->component(column_indices[a][c], 0),
+                                  column_types_[c]->size, column_types_[c]->alignment};
+                DynamicChunkView view{{&chunk->entity(0), chunk->count()}, columns};
+                visitor(context, view);
+            }
+        }
+    }
+    template <class Func> void each_chunk(Func&& visitor) const {
+        // A local adapter also supports const callable objects and free functions.
+        auto adapter = [&](const DynamicChunkView& view) { visitor(view); };
+        each_chunk([](void* context, const DynamicChunkView& view) {
+            (*static_cast<decltype(adapter)*>(context))(view);
+        }, &adapter);
+    }
+
+private:
+    static bool mentions(const std::vector<uint64_t>& ids, uint64_t id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    }
+    void prepare_impl(ComponentRegistry& registry) {
+        if (is_prepared && registry_ == &registry) return;
+        reset();
+        auto require = [&](uint64_t id) -> const TypeInfo* {
+            auto* info = registry.get_info(id);
+            if (!info)
+                throw std::invalid_argument("Dynamic query uses unregistered component id " + std::to_string(id));
+            return info;
+        };
+        for (uint64_t id : descriptor_.columns) {
+            auto* info = require(id);
+            if (info->size == 0)
+                throw std::invalid_argument("Dynamic query tag must be a filter, not a data column: " +
+                                            std::to_string(id));
+            column_types_.push_back(info);
+            with_mask.set(registry.local_index(id));
+        }
+        for (uint64_t id : descriptor_.with) {
+            require(id);
+            with_mask.set(registry.local_index(id));
+        }
+        for (uint64_t id : descriptor_.without) {
+            require(id);
+            without_mask.set(registry.local_index(id));
+        }
+        bool disabled_mentioned = mentions(descriptor_.columns, TypeTraits<DisabledTag>::id) ||
+                                  mentions(descriptor_.with, TypeTraits<DisabledTag>::id) ||
+                                  mentions(descriptor_.without, TypeTraits<DisabledTag>::id);
+        for (const auto* info : external_withs) {
+            if (!info) throw std::invalid_argument("Null dynamic query filter");
+            with_mask.set(registry.ensure_registered(info));
+            disabled_mentioned |= info->id == TypeTraits<DisabledTag>::id;
+        }
+        for (const auto* info : external_withouts) {
+            if (!info) throw std::invalid_argument("Null dynamic query filter");
+            without_mask.set(registry.ensure_registered(info));
+            disabled_mentioned |= info->id == TypeTraits<DisabledTag>::id;
+        }
+        if (!descriptor_.include_inactive && !disabled_mentioned)
+            without_mask.set(registry.ensure_registered(get_type_info_ptr<DisabledTag>()));
+        registry_ = &registry;
+        is_prepared = true;
+    }
+    void update_archetype_impl(Archetype<DefaultConfig>* arch) {
+        if (!arch || !match_all(arch->bit_sig(), with_mask) || intersects(arch->bit_sig(), without_mask))
+            return;
+        if (std::find(matched_archetypes.begin(), matched_archetypes.end(), arch) != matched_archetypes.end())
+            return;
+        std::vector<size_t> indices;
+        indices.reserve(descriptor_.columns.size());
+        for (uint64_t id : descriptor_.columns) {
+            auto column = arch->get_column_index(id);
+            if (!column) return;
+            indices.push_back(*column);
+        }
+        column_indices.push_back(std::move(indices));
+        try {
+            matched_archetypes.push_back(arch);
+        } catch (...) {
+            column_indices.pop_back();
+            throw;
+        }
+    }
+
+    DynamicQueryDesc descriptor_;
+    const ComponentRegistry* registry_ = nullptr;
+    std::vector<const TypeInfo*> column_types_;
 };
 
 template <typename T> struct get_res_type {

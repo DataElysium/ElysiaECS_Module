@@ -92,3 +92,60 @@ xmake run ElysiaHelloWorld
 xmake build elysia_boids
 xmake run elysia_boids
 ```
+
+
+## Runtime component queries
+
+`DynamicQuery` selects columns and filters by registered component IDs. It does
+not require a C++ component definition or a reflection registry:
+
+```cpp
+const auto id = elysia::fnv1a_64("plugin::Position");
+// A plugin/loader can supply this descriptor and lifecycle hooks instead.
+world.graph().registry().register_opaque(
+    id, "plugin::Position", 3 * sizeof(double), alignof(double));
+
+elysia::DynamicQuery query({.columns = {id}});
+world.update_query(query);
+query.each_chunk([](const elysia::DynamicChunkView& chunk) {
+    // chunk.entities: entity IDs in row order
+    // chunk.columns: selected columns in descriptor order
+    // Each column provides its ID, address, byte stride, and alignment.
+    // Interpret its bytes using your plugin's schema or native code.
+});
+```
+
+`with` and `without` contain additional required and excluded IDs. Tags belong
+in filters, not selected data columns. Disabled entities are excluded by default;
+set `include_inactive = true` or explicitly require `DisabledTag` to include them.
+Every explicit ID must already be registered. Unknown IDs, duplicate columns,
+and contradictory descriptor filters report errors.
+
+Call `world.update_query(query)` before each traversal to discover new archetypes.
+The cached query rebinds when updated against a different world's registry.
+Call `query.reset()` after moving/replacing a world or changing inherited external
+filters. The query and borrowed views must not outlive the world they reference.
+
+For erased callers, `each_chunk(visitor, context)` accepts a plain function pointer
+with signature `void(void*, const DynamicChunkView&)`. Column/entity views are
+valid only during the callback. Structural changes must be deferred until
+iteration ends. Concurrent access still requires the caller's synchronization;
+the descriptor does not infer access conflicts or schedule work.
+
+This API uses C++ view types; it is not a versioned C ABI. A DLL-facing facade can
+translate its own plain descriptors and callbacks without adding reflection to
+the ECS.
+
+
+### Runtime adapter example
+
+Run `xmake run -P . runtime_trait_example` after building
+`xmake build -P . runtime_trait_example` from this repository.
+
+`examples/runtime_trait.cpp` is an example-local `RuntimeTrait{&world}` prototype.
+Start at `main()` for the host flow, then inspect `plugin::samples_type()` for
+custom deep-copy, move, and destruction callbacks. Runtime resources live in an
+external map owned by a single host resource; they are not exposed through
+`Res<T>`. No `World` APIs or core lifecycle metadata are changed. The plugin
+namespace models a plugin boundary in one executable; this is not a DLL loader
+or a C ABI.
