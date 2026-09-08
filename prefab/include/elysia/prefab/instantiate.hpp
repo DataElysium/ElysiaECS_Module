@@ -27,12 +27,19 @@ class PrefabRegistry {
     void load_library(Library lib) {
         // Build privately: a failed replacement preserves the previous library.
         auto world = std::make_unique<World>();
+        install_hierarchy(*world);
+        std::map<std::string, Entity> roots;
         for (const auto &[name, cls] : lib) {
             validate_records(name, cls);
-            build_template(*world, name, cls);
+            roots.emplace(name, build_template(*world, name, cls));
         }
         library_ = std::move(lib);
         templates_ = std::move(world);
+        template_roots_ = std::move(roots);
+    }
+    Entity template_root(const std::string& name) const { return template_roots_.at(resolve_class(name, "")); }
+    graph::DirectedGraph<Entity> template_graph(const std::string& name) const {
+        return build_hierarchy_graph(*templates_, template_root(name));
     }
     Library export_library() const { return library_; }
     PrefabClass export_class(const std::string &name) const { return library_.at(resolve_class(name, "")); }
@@ -49,6 +56,7 @@ class PrefabRegistry {
             auto e = validation.spawn().entity;
             decode_record(validation, e, row);
         }
+        install_hierarchy(world);
         Spawned result;
         try {
             for (size_t i = 0; i < pending.size(); ++i)
@@ -87,7 +95,7 @@ class PrefabRegistry {
         std::string context;
         std::vector<ComponentValue> components;
     };
-    void build_template(World &world, const std::string &name, const PrefabClass &cls) const {
+    Entity build_template(World &world, const std::string &name, const PrefabClass &cls) const {
         auto root = world.spawn().add(PrefabRoot{name, cls.params}).entity;
         std::map<uint32_t, Entity> entities;
         for (const auto &row : cls.body)
@@ -119,6 +127,7 @@ class PrefabRegistry {
                 }
             }
         }
+        return root;
     }
 
     LookupScope scope_for(const std::string &cls) const {
@@ -140,22 +149,22 @@ class PrefabRegistry {
         throw Error("Unknown prefab '" + name + "' in '" + from + "'");
     }
     static void validate_records(const std::string &name, const PrefabClass &cls) {
-        std::map<uint32_t, std::optional<uint32_t>> parents;
-        for (const auto &row : cls.body)
-            if (!parents.emplace(row.id, row.parent).second)
+        graph::DirectedGraph<uint32_t> hierarchy;
+        for (const auto& row : cls.body) {
+            if (hierarchy.has_node(row.id))
                 throw Error("Prefab '" + name + "': duplicate record id " + std::to_string(row.id));
-        for (const auto &row : cls.body) {
-            std::set<uint32_t> path{row.id};
-            auto parent = row.parent;
-            while (parent) {
-                if (!parents.contains(*parent))
-                    throw Error("Prefab '" + name + "': missing parent " + std::to_string(*parent));
-                if (!path.insert(*parent).second)
-                    throw Error("Prefab '" + name + "': cyclic parent hierarchy");
-                parent = parents.at(*parent);
-            }
+            hierarchy.add_node(row.id);
         }
+        for (const auto& row : cls.body) {
+            if (!row.parent) continue;
+            if (!hierarchy.has_node(*row.parent))
+                throw Error("Prefab '" + name + "': missing parent " + std::to_string(*row.parent));
+            hierarchy.add_edge(*row.parent, row.id);
+        }
+        if (graph::algo::kahn_layers(hierarchy).has_cycle)
+            throw Error("Prefab '" + name + "': cyclic parent hierarchy");
     }
+
     void decode_record(World &world, Entity e, const Pending &row) const {
         try {
             for (const auto &component : row.components) {
@@ -268,6 +277,7 @@ class PrefabRegistry {
     }
     ComponentRegistry components_;
     Library library_;
+    std::map<std::string, Entity> template_roots_;
     Object globals_;
     LookupScope scope_;
     std::set<std::string> net_names_{"Net"};

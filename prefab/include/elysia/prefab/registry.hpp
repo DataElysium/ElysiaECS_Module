@@ -1,5 +1,6 @@
 #pragma once
 #include "elysia/archive/registry.hpp"
+#include "elysia/hierarchy.hpp"
 #include "format.hpp"
 #include <memory>
 #include <set>
@@ -23,9 +24,8 @@ struct Refs {
 struct Bound {
     std::map<std::string, Entity> values;
 };
-struct ChildOf {
-    Entity parent;
-};
+using ::elysia::ChildOf;
+using ::elysia::Children;
 struct PrefabEntityId {
     Entity instance;
     uint32_t local;
@@ -105,6 +105,8 @@ class ComponentRegistry {
     const archive::SnapshotRegistry &archive_registry() const { return *archive_; }
 
     void decode(World &world, Entity e, const archive::ComponentFactory &fac, const Value &value) const {
+        if (fac.type_id == TypeTraits<ChildOf>::id || fac.type_id == TypeTraits<Children>::id)
+            throw Error("Hierarchy components must be expressed through record parent links");
         if (!fac.generic)
             throw Error("Component '" + fac.key + "' has no generic decoder");
         auto result = fac.generic->from_generic(world, e, value);

@@ -7,6 +7,15 @@ export namespace elysia {
 using ::elysia::World;
 using ::elysia::Entity;
 using ::elysia::TypeTraits;
+using ::elysia::ChildOf;
+using ::elysia::Children;
+using ::elysia::install_hierarchy;
+using ::elysia::attach_child;
+using ::elysia::detach_child;
+using ::elysia::reparent;
+using ::elysia::collect_subtree;
+using ::elysia::build_hierarchy_graph;
+using ::elysia::despawn_subtree;
 }
 export namespace elysia::archive {
 using ::elysia::archive::SnapshotRegistry;
@@ -28,6 +37,7 @@ using ::elysia::prefab::Spawned;
 using ::elysia::prefab::Local;
 using ::elysia::prefab::NameTag;
 using ::elysia::prefab::ChildOf;
+using ::elysia::prefab::Children;
 using ::elysia::prefab::PrefabEntityId;
 using ::elysia::prefab::Refs;
 using ::elysia::prefab::Bound;

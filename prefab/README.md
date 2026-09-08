@@ -134,9 +134,50 @@ when its typed template view must reflect a changed codec.
   producing numeric pins. `@gnd` can refer to a registered global ground;
   literal internal names are scoped like the Rust spawn path.
 
-Hierarchy uses `elysia::prefab::ChildOf`, an ordinary component. This is the
-prefab hierarchy contract, not an implicit dependency on a game hierarchy plugin.
-Reference resolution is explicit and rerunnable after entity changes.
+Hierarchy reuses the ECS plugin's `elysia::ChildOf` and `elysia::Children` types;
+the prefab names are aliases, not separate components. The shared implementation
+is in `elysia/hierarchy.hpp` (`elysia.hierarchy` for module consumers).
+`HierarchyPlugin` delegates to the same `install_hierarchy(World&)` function,
+so a plain prefab world does not need an App or a scheduler.
+
+Loading installs the hooks on the private template world. Spawning installs them
+on the destination world before inserting validated parent links. Children lists
+are populated immediately, including nested Use attachment points and records
+whose parents appear later in the file. Record validation uses one graph-based
+cycle check rather than repeatedly walking ancestors.
+
+```cpp
+auto instance = prefabs.spawn_class(world, "electrical::branch");
+auto root = instance.roots.at(0);
+auto entities = elysia::collect_subtree(world, root);
+auto graph = elysia::build_hierarchy_graph(world, root);
+// graph.key(node_id) gives the original Entity; components remain in world.
+
+auto authored_graph = prefabs.template_graph("electrical::branch");
+auto authored_root = prefabs.template_root("electrical::branch");
+```
+
+Both traversal functions follow Children within the selected subtree; neither
+queries all ChildOf components. ChildOf/Children are the live relationship data.
+The returned DirectedGraph is an optional snapshot, rebuilt on request after
+editing; it is not another automatically maintained cache on the root.
+
+Supported edits are `attach_child(world, parent, child)`,
+`detach_child(world, child)`, and `reparent(world, child, new_parent)`.
+Reparenting checks the child's descendants for cycles, then removes the old
+ChildOf before inserting the new one. Same-parent attachment is idempotent.
+`despawn_subtree(world, root)` deletes descendants before their parents;
+ordinary world.despawn also cascades through installed hierarchy hooks.
+
+Install hierarchy before independently inserting relationship components.
+As with world-bound observer callbacks, keep that World at a stable address
+until it is destroyed. Mutations require exclusive structural access. Direct
+writes to relationship fields, direct replacement with a different parent
+without removal, and direct edits to Children bypass this API's consistency
+contract. Hierarchy codecs are not accepted as ordinary prefab component data;
+parent links are expressed through record.parent.
+
+Reference resolution remains explicit and rerunnable after entity changes.
 
 ## Authoring, archives, and failure boundaries
 

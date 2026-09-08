@@ -35,6 +35,65 @@ TEST(Prefab, UnchangedRustCarManifest) {
     EXPECT_EQ(wheels, 4);
     EXPECT_NE(world.get_component<car_demo::PlayerControl>(result.roots[0]), nullptr);
 }
+TEST(Prefab, HierarchyIsAvailableImmediatelyWithoutAWorldScan) {
+    static_assert(std::is_same_v<p::ChildOf, elysia::ChildOf>);
+    static_assert(std::is_same_v<p::Children, elysia::Children>);
+    elysia::World world;
+    p::PrefabRegistry registry(car_demo::registry());
+    auto spawned = car_demo::load_game(world, registry, car_demo::read_file("fixtures/game.json"));
+    std::set<uint64_t> reached;
+    for (auto root : spawned.roots) {
+        auto direct = elysia::collect_subtree(world, root);
+        auto graph = elysia::build_hierarchy_graph(world, root);
+        EXPECT_EQ(graph.node_count(), direct.size());
+        for (auto entity : direct) {
+            EXPECT_TRUE(graph.has_node(entity));
+            EXPECT_TRUE(reached.insert(entity.value).second);
+        }
+    }
+    EXPECT_EQ(reached.size(), 11);
+    for (auto entity : spawned.entities) EXPECT_TRUE(reached.contains(entity.value));
+    auto car = elysia::build_hierarchy_graph(world, spawned.roots[0]);
+    EXPECT_EQ(car.node_count(), 9);
+    EXPECT_EQ(car.out_degree(car.id(spawned.roots[0])), 4);
+}
+TEST(Prefab, TemplateGraphPreservesOutOfOrderParentsAndFailedReload) {
+    p::PrefabRegistry registry;
+    registry.load_library(library(R"({"tree":{"body":[
+        {"id":9,"parent":2,"components":{}},
+        {"id":2,"parent":7,"components":{}},
+        {"id":7,"components":{}}]}})"));
+    auto root = registry.template_root("tree");
+    auto graph = registry.template_graph("tree");
+    EXPECT_EQ(graph.node_count(), 4);
+    EXPECT_EQ(graph.out_degree(graph.id(root)), 1);
+    EXPECT_THROW(registry.load_library(library(R"({"tree":{"body":[
+        {"id":1,"parent":2,"components":{}},{"id":2,"parent":1,"components":{}}]}})")), p::Error);
+    EXPECT_EQ(registry.template_root("tree"), root);
+    EXPECT_EQ(registry.template_graph("tree").node_count(), 4);
+    elysia::World world;
+    auto spawned = registry.spawn_class(world, "tree");
+    auto top_down = elysia::collect_subtree(world, spawned.roots[0]);
+    ASSERT_EQ(top_down.size(), 3);
+    EXPECT_EQ(world.get_component<p::PrefabEntityId>(top_down[0])->local, 7);
+    EXPECT_EQ(world.get_component<p::PrefabEntityId>(top_down[1])->local, 2);
+    EXPECT_EQ(world.get_component<p::PrefabEntityId>(top_down[2])->local, 9);
+}
+TEST(Prefab, SpawnFailureCleansUpMaintainedHierarchy) {
+    p::ComponentRegistry types;
+    types.register_type<Pair>("Pair");
+    p::PrefabRegistry registry(types);
+    registry.load_library(library(R"({"tree":{"body":[
+        {"id":0,"components":{}},
+        {"id":1,"parent":0,"components":{}},
+        {"id":2,"parent":1,"components":{"Pair":{"a":1,"b":2}}}]}})"));
+    elysia::World world;
+    auto unrelated = world.spawn().entity;
+    world.observer().on_add<Pair>([](auto) { throw std::runtime_error("insertion failed"); });
+    EXPECT_THROW(registry.spawn_class(world, "tree"), std::runtime_error);
+    EXPECT_EQ(entity_count(world), 1);
+    EXPECT_TRUE(world.index().is_alive(unrelated));
+}
 TEST(Prefab, DefaultRegistrationUsesNativeFullName) {
     p::ComponentRegistry components;
     components.register_type<car_demo::Transform>();
