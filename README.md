@@ -188,3 +188,21 @@ The runner adds no DLL loader or stable C ABI. Its callback and captures must be
 destroyed or cleared before unloading their defining library; do so after the
 runner returns. Other plugin-owned systems and resources have their own lifetime
 requirements as well.
+
+### Execution profiling
+
+Configure `xmake f --perf_overlay=y` to collect Serial/Taskflow execution profiles
+(default enabled). `App::execution_profile()` returns an owned copy after `update()`
+returns or throws. Direct executors expose `profile()` by const reference; read it
+only between runs. ForkUnion is not instrumented.
+
+Each compiled node has a preallocated timing slot. Durations include query refresh;
+explicit ApplyDeferred and final command-buffer flushes are separate records.
+Initialization appears only when performed. Exceptions mark the failing record;
+cancelled/unreached records have `executed=false`. An empty callable is timed,
+while labels pruned by the compiler have no record. `wall_ms` measures the entire
+executor call, including scheduling and failure cleanup. Parallel durations overlap.
+Names are owned strings (including legacy `sys_times()` entries), so copies survive
+executor destruction. With profiling disabled the profile is empty and `enabled=false`.
+Header consumers must use the same `ELYSIA_PERF_OVERLAY` definition in every TU;
+the exported xmake target propagates this setting.

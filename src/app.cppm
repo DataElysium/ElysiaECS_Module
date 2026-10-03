@@ -132,6 +132,13 @@ public:
       executor_->run(&world_);
   }
 
+  // Copy only after update returns (or throws), never concurrently with it.
+  ExecutionProfile execution_profile() const {
+    if (use_parallel_ && parallel_executor_) return parallel_executor_->profile();
+    if (executor_) return executor_->profile();
+    return {};
+  }
+
 private:
   World world_;
   Scheduler scheduler_;

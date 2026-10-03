@@ -129,6 +129,81 @@ private:
     fu::flat_pool_t pool_; std::vector<Wave> waves_; ScheduleRuntime* sched_ = nullptr; World* bound_world_ = nullptr;
 };
 
+// Owned names make a completed profile safe to copy across a snapshot boundary.
+// Read only between runs. System durations include query preparation; concurrent
+// durations overlap and must never be summed to obtain executor wall time.
+enum class TimingKind { Initialize, System, ApplyDeferred, FinalFlush };
+struct SystemTiming {
+    std::string name;
+    double ms = 0;
+    bool executed = false, failed = false;
+    TimingKind kind = TimingKind::System;
+};
+struct ExecutionProfile {
+    bool enabled = false, completed = false;
+    double wall_ms = 0;
+    std::vector<SystemTiming> systems;
+};
+
+namespace detail {
+class ScheduleProfiler {
+public:
+    ExecutionProfile value;
+    void prepare(World& meta, const std::vector<entity_t>& nodes) {
+#ifdef ELYSIA_PERF_OVERLAY
+        value = {};
+        value.enabled = true;
+        value.systems.push_back({"[initialize]", 0, false, false, TimingKind::Initialize});
+        for (auto e : nodes) {
+            auto view = meta.entity(e);
+            auto* name = view.get<schedule::SysName>();
+            auto* exec = view.get<schedule::SysExecutor>();
+            value.systems.push_back({name ? name->value : std::to_string(e.value), 0, false, false,
+                exec && exec->kind == schedule::SpecialSystemKind::ApplyDeferred
+                    ? TimingKind::ApplyDeferred : TimingKind::System});
+        }
+        value.systems.push_back({"[final flush]", 0, false, false, TimingKind::FinalFlush});
+#endif
+    }
+    template<class F> void measure(size_t slot, F&& fn) {
+#ifdef ELYSIA_PERF_OVERLAY
+        auto& sample = value.systems[slot];
+        sample.executed = true;
+        const auto begin = std::chrono::steady_clock::now();
+        try { fn(); }
+        catch (...) {
+            sample.ms = elapsed(begin);
+            sample.failed = true;
+            throw;
+        }
+        sample.ms = elapsed(begin);
+#else
+        fn();
+#endif
+    }
+    template<class F> void run(F&& fn) {
+#ifdef ELYSIA_PERF_OVERLAY
+        value.completed = false;
+        for (auto& sample : value.systems) {
+            sample.ms = 0;
+            sample.executed = sample.failed = false;
+        }
+        const auto begin = std::chrono::steady_clock::now();
+        try { fn(); }
+        catch (...) { value.wall_ms = elapsed(begin); throw; }
+        value.wall_ms = elapsed(begin);
+        value.completed = true;
+#else
+        fn();
+#endif
+    }
+private:
+    static double elapsed(std::chrono::steady_clock::time_point begin) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    }
+};
+} // namespace detail
+
 class SerialExecutor : public schedule::SysExecutor {
     std::shared_ptr<ScheduleRuntime> runtime_;
 public:
@@ -145,42 +220,33 @@ public:
         bound_world_ = world;
     }
     void run(World* world) {
-        if (!world || world != bound_world_) init_all(world);
-#ifdef ELYSIA_PERF_OVERLAY
-        sys_times_.clear();
-        using Clock = std::chrono::steady_clock;
-        using Ms    = std::chrono::duration<float, std::milli>;
-#endif
-        try {
-            for (auto e : plan_) {
-                auto view = meta_world_->entity(e);
-                auto* exec = view.get<schedule::SysExecutor>();
-                if (auto* q_comp = view.get<schedule::SysQuery>(); q_comp && q_comp->ptr) world->update_query(*static_cast<QueryState*>(q_comp->ptr.get()));
-                auto* cmd_comp = view.get<schedule::SysCmdBuf>();
-                void* cmd_ptr = cmd_comp ? cmd_comp->ptr.get() : nullptr;
-                if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) {
-                    flush_all_buffers(world);
-                } else if (exec->func) {
-    #ifdef ELYSIA_PERF_OVERLAY
-                    auto t0 = Clock::now();
-                    schedule::invoke_system(*exec, world, cmd_ptr, *meta_world_, e);
-                    float ms = Ms(Clock::now() - t0).count();
-                    const char* name = "";
-                    if (auto* n = view.get<schedule::SysName>()) name = n->value.c_str();
-                    sys_times_.push_back({name, ms});
-    #else
-                    schedule::invoke_system(*exec, world, cmd_ptr, *meta_world_, e);
-    #endif
+        profiler_.run([&] {
+            try {
+                if (!world || world != bound_world_)
+                    profiler_.measure(0, [&] { init_all(world); });
+                for (size_t i = 0; i < plan_.size(); ++i) {
+                    profiler_.measure(i + 1, [&] {
+                        auto e = plan_[i];
+                        auto view = meta_world_->entity(e);
+                        auto* exec = view.get<schedule::SysExecutor>();
+                        if (auto* q = view.get<schedule::SysQuery>(); q && q->ptr)
+                            world->update_query(*static_cast<QueryState*>(q->ptr.get()));
+                        auto* cmd = view.get<schedule::SysCmdBuf>();
+                        if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) flush_all_buffers(world);
+                        else if (exec->func)
+                            schedule::invoke_system(*exec, world, cmd ? cmd->ptr.get() : nullptr, *meta_world_, e);
+                    });
                 }
+                profiler_.measure(plan_.size() + 1, [&] { flush_all_buffers(world); });
+            } catch (...) {
+                runtime_->discard_commands();
+                throw;
             }
-            flush_all_buffers(world);
-        } catch (...) {
-            runtime_->discard_commands();
-            throw;
-        }
+        });
     }
-    struct SysTime { const char* name; float ms; };
-    const std::vector<SysTime>& sys_times() const { return sys_times_; }
+    using SysTime = SystemTiming;
+    const std::vector<SysTime>& sys_times() const { return profiler_.value.systems; }
+    const ExecutionProfile& profile() const { return profiler_.value; }
 private:
     void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
         sched_ = &sched; meta_world_ = &sched.meta_world(); plan_.clear();
@@ -192,10 +258,11 @@ private:
                 if (meta_world_->entity(e).get<schedule::SysExecutor>()) plan_.push_back(e);
             }
         }
+        profiler_.prepare(*meta_world_, plan_);
     }
     void flush_all_buffers(World* world) { meta_world_->query<schedule::SysCmdBuf>().each([&](auto& cmd) { if (cmd.ptr && !cmd.ptr->headers().empty()) { world->submit(*cmd.ptr); cmd.ptr->clear(); } }); }
     ScheduleRuntime* sched_ = nullptr; World* meta_world_ = nullptr; std::vector<entity_t> plan_; World* bound_world_ = nullptr;
-    std::vector<SysTime> sys_times_;
+    detail::ScheduleProfiler profiler_;
 };
 
 class TaskflowExecutor : public schedule::SysExecutor {
@@ -214,59 +281,62 @@ public:
         bound_world_ = world;
     }
     void run(World* world) {
-        if (!world || world != bound_world_) init_all(world);
-        current_world_ = world;
-#ifdef ELYSIA_PERF_OVERLAY
-        sys_times_.clear();
-#endif
-        try {
-            // get waits for cancellation/running tasks and rethrows task failures.
-            for (size_t i = 0; i < taskflows_.size(); ++i) {
-                if (taskflows_[i]->num_tasks()) executor_.run(*taskflows_[i]).get();
-                if (i < caller_systems_.size()) execute_system(caller_systems_[i]);
+        profiler_.run([&] {
+            try {
+                if (!world || world != bound_world_)
+                    profiler_.measure(0, [&] { init_all(world); });
+                current_world_ = world;
+                // get waits for cancellation/running tasks and rethrows task failures.
+                for (size_t i = 0; i < taskflows_.size(); ++i) {
+                    if (taskflows_[i]->num_tasks()) executor_.run(*taskflows_[i]).get();
+                    if (i < caller_systems_.size()) {
+                        auto [entity, slot] = caller_systems_[i];
+                        execute_system(entity, slot);
+                    }
+                }
+                profiler_.measure(final_slot_, [&] { flush_all_buffers(world); });
+            } catch (...) {
+                current_world_ = nullptr;
+                runtime_->discard_commands();
+                throw;
             }
-            flush_all_buffers(world);
-        } catch (...) {
             current_world_ = nullptr;
-            runtime_->discard_commands();
-            throw;
-        }
-        current_world_ = nullptr;
+        });
     }
-    struct SysTime { const char* name; float ms; };
-    const std::vector<SysTime>& sys_times() const { return sys_times_; }
+    using SysTime = SystemTiming;
+    const std::vector<SysTime>& sys_times() const { return profiler_.value.systems; }
+    const ExecutionProfile& profile() const { return profiler_.value; }
 private:
-    void execute_system(entity_t e) {
-        auto* w = current_world_;
-        auto view = meta_ptr_->entity(e);
-        auto* exec = view.get<schedule::SysExecutor>();
-        if (!exec) return;
-        if (auto* q = view.get<schedule::SysQuery>(); q && q->ptr)
-            w->update_query(*static_cast<QueryState*>(q->ptr.get()));
-        auto* cmd = view.get<schedule::SysCmdBuf>();
-#ifdef ELYSIA_PERF_OVERLAY
-        auto start = std::chrono::steady_clock::now();
-#endif
-        if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) flush_all_buffers(w);
-        else if (exec->func) schedule::invoke_system(*exec, w, cmd ? cmd->ptr.get() : nullptr, *meta_ptr_, e);
-#ifdef ELYSIA_PERF_OVERLAY
-        float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
-        std::lock_guard<std::mutex> lock(times_mtx_);
-        auto* name = view.get<schedule::SysName>();
-        sys_times_.push_back({name ? name->value.c_str() : "", ms});
-#endif
+    void execute_system(entity_t e, size_t slot) {
+        // Every compiled node owns a distinct, preallocated slot. No worker lock
+        // or allocation is needed, and cancelled nodes remain unexecuted.
+        profiler_.measure(slot, [&] {
+            auto* w = current_world_;
+            auto view = meta_ptr_->entity(e);
+            auto* exec = view.get<schedule::SysExecutor>();
+            if (!exec) return;
+            if (auto* q = view.get<schedule::SysQuery>(); q && q->ptr)
+                w->update_query(*static_cast<QueryState*>(q->ptr.get()));
+            auto* cmd = view.get<schedule::SysCmdBuf>();
+            if (exec->kind == schedule::SpecialSystemKind::ApplyDeferred) flush_all_buffers(w);
+            else if (exec->func) schedule::invoke_system(*exec, w, cmd ? cmd->ptr.get() : nullptr, *meta_ptr_, e);
+        });
     }
     void compile(ScheduleRuntime& sched, schedule::CompileOptions options) {
         sched_ = &sched; meta_ptr_ = &sched.meta_world();
         auto sg = schedule::compile_dag(*meta_ptr_, options);
         auto order = graph::algo::kahn_layers(sg);
         taskflows_.clear(); caller_systems_.clear();
+        std::vector<entity_t> profiled_nodes;
+        for (size_t i = 0; i < sg.node_count(); ++i) profiled_nodes.push_back(sg.key(i).entity);
+        profiler_.prepare(*meta_ptr_, profiled_nodes);
+        final_slot_ = profiled_nodes.size() + 1;
         std::vector<std::vector<size_t>> runs(1);
         // Caller nodes are explicit join points. They never enter a worker taskflow.
         for (auto i : order.nodes_sorted) {
             auto* exec = meta_ptr_->entity(sg.key(i).entity).get<schedule::SysExecutor>();
             if (exec && exec->affinity == schedule::ThreadAffinity::Caller) {
-                caller_systems_.push_back(sg.key(i).entity);
+                caller_systems_.push_back({sg.key(i).entity, i + 1});
                 runs.emplace_back();
             } else runs.back().push_back(i);
         }
@@ -276,7 +346,7 @@ private:
             for (auto i : run) {
                 auto e = sg.key(i).entity;
                 auto* name = meta_ptr_->entity(e).get<schedule::SysName>();
-                tasks[i] = flow->emplace([this, e] { execute_system(e); }).name(name ? name->value : std::to_string(i));
+                tasks[i] = flow->emplace([this, e, i] { execute_system(e, i + 1); }).name(name ? name->value : std::to_string(i));
             }
             // Preserve ordinary DAG concurrency and exclusive boundaries within each run.
             const auto count = sg.node_count();
@@ -316,9 +386,9 @@ private:
     ScheduleRuntime* sched_ = nullptr;
     tf::Executor executor_;
     std::vector<std::unique_ptr<tf::Taskflow>> taskflows_;
-    std::vector<entity_t> caller_systems_; World* current_world_ = nullptr; World* meta_ptr_ = nullptr; World* bound_world_ = nullptr;
-    std::vector<SysTime> sys_times_;
-    std::mutex times_mtx_;
+    std::vector<std::pair<entity_t, size_t>> caller_systems_; World* current_world_ = nullptr; World* meta_ptr_ = nullptr; World* bound_world_ = nullptr;
+    detail::ScheduleProfiler profiler_;
+    size_t final_slot_ = 0;
 };
 
 } // namespace elysia

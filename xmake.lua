@@ -126,7 +126,7 @@ local function add_core_settings(api_define)
     add_packages("nameof", "taskflow")
 
     if has_config("perf_overlay") then
-        add_defines("ELYSIA_PERF_OVERLAY")
+        add_defines("ELYSIA_PERF_OVERLAY", {public = true})
     end
 
     add_includedirs("thirdparty/ForkUnion/include", {public = true})
