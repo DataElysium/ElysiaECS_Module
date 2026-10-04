@@ -15,6 +15,17 @@ using namespace elysia;
 
 struct Val { int x; };
 
+TEST(TaskflowWorkers, ExplicitBudgetIsRespected) {
+    Scheduler schedule;
+    std::atomic<unsigned> executed{0};
+    schedule.system("work").run([&] { ++executed; }).build();
+    World world;
+    auto executor = TaskflowExecutor::build_from(schedule, {}, 2);
+    EXPECT_EQ(executor->worker_count(), 2u);
+    executor->run(&world);
+    EXPECT_EQ(executed.load(), 1u);
+}
+
 TEST(ElysiaScheduler, ParallelApplyDeferred) {
     World world;
     Scheduler scheduler;

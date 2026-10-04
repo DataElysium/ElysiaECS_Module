@@ -268,10 +268,13 @@ private:
 class TaskflowExecutor : public schedule::SysExecutor {
     std::shared_ptr<ScheduleRuntime> runtime_;
 public:
-    static std::unique_ptr<TaskflowExecutor> build_from(Scheduler& sched, schedule::CompileOptions options = {}) { return build_from(sched.snapshot(), options); }
-    static std::unique_ptr<TaskflowExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime, schedule::CompileOptions options = {}) {
+    explicit TaskflowExecutor(size_t workers = 0)
+        : executor_(workers ? workers : std::max(1u, std::thread::hardware_concurrency())) {}
+    size_t worker_count() const { return executor_.num_workers(); }
+    static std::unique_ptr<TaskflowExecutor> build_from(Scheduler& sched, schedule::CompileOptions options = {}, size_t workers = 0) { return build_from(sched.snapshot(), options, workers); }
+    static std::unique_ptr<TaskflowExecutor> build_from(std::shared_ptr<ScheduleRuntime> runtime, schedule::CompileOptions options = {}, size_t workers = 0) {
         if (!runtime) throw std::invalid_argument("Executor requires a schedule runtime");
-        auto exec = std::make_unique<TaskflowExecutor>();
+        auto exec = std::make_unique<TaskflowExecutor>(workers);
         exec->runtime_ = std::move(runtime);
         exec->compile(*exec->runtime_, options);
         return exec;

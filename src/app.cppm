@@ -110,14 +110,14 @@ public:
     use_parallel_ = false;
   }
   void init() { init_serial(); }
-  void init_parallel() {
+  void init_parallel(size_t workers = 0) {
     if (!is_started_) {
       auto startup_exec = SerialExecutor::build_from(startup_scheduler_);
       startup_exec->run(&world_);
       is_started_ = true;
     }
     if (!runtime_) runtime_ = scheduler_.instantiate(world_);
-    parallel_executor_ = TaskflowExecutor::build_from(runtime_);
+    parallel_executor_ = TaskflowExecutor::build_from(runtime_, {}, workers);
     use_parallel_ = true;
   }
 
