@@ -140,6 +140,77 @@ TEST(ScheduleMermaid, PreservesDiamondAndSetBoundaries) {
     EXPECT_EQ(actual,expected);
 }
 
+TEST(ScheduleMermaid, GroupsNestedSetsWithoutChangingNodesOrEdges) {
+    Scheduler scheduler;
+    scheduler.phase("Frame");
+    scheduler.system("Left").in_set("Motion \"drivers\"").run([]{}).build();
+    scheduler.system("Right").in_set("Motion \"drivers\"").run([]{}).build();
+    scheduler.meta_world().entity(scheduler.resolve("Motion \"drivers\""))
+        .add(schedule::InSet{scheduler.resolve("Frame")});
+    scheduler.system("Join").after("Frame").run([]{}).build();
+    auto dag = schedule::build_dag(scheduler.meta_world());
+    auto grouped = schedule::to_mermaid(dag, scheduler.meta_world());
+    auto flat = schedule::to_mermaid(dag, scheduler.meta_world(),
+                                    schedule::MermaidDirection::TopDown,
+                                    schedule::MermaidLayout::Flat);
+    auto outer = grouped.find("[\"Frame\"]");
+    auto inner = grouped.find("[\"Motion #34;drivers#34;\"]");
+    EXPECT_NE(outer, std::string::npos);
+    EXPECT_NE(inner, std::string::npos);
+    EXPECT_LT(outer, inner);
+    EXPECT_EQ(flat.find("subgraph"), std::string::npos);
+    // The grouping is presentation only: exactly the same numeric nodes and edges.
+    auto lines = [](const std::string& text) {
+        std::vector<std::string> out;
+        size_t start = 0;
+        while ((start = text.find("  n", start)) != std::string::npos) {
+            auto end = text.find('\n', start);
+            out.push_back(text.substr(start, end - start));
+            start = end;
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    EXPECT_EQ(lines(grouped), lines(flat));
+    EXPECT_EQ(grouped, schedule::to_mermaid(dag, scheduler.meta_world()));
+    auto compiled = schedule::compile_dag(scheduler.meta_world());
+    EXPECT_NO_THROW(schedule::to_mermaid(compiled, scheduler.meta_world()));
+    // Malformed hierarchy must remain exportable for debugging.
+    scheduler.meta_world().entity(scheduler.resolve("Frame"))
+        .add(schedule::InSet{scheduler.resolve("Motion \"drivers\"")});
+    EXPECT_NO_THROW(schedule::to_mermaid(scheduler.meta_world()));
+}
+
+TEST(ScheduleMermaid, CompactSetsHideOnlyMembershipWiring) {
+    Scheduler scheduler;
+    scheduler.system("Input").run([]{}).build();
+    scheduler.system("Left").in_set("Frame").after("Input").run([]{}).build();
+    scheduler.system("Right").in_set("Frame").after("Left").run([]{}).build();
+    scheduler.system("Output").after("Frame").run([]{}).build();
+    auto dag = schedule::build_dag(scheduler.meta_world());
+    auto compact = schedule::to_mermaid(dag, scheduler.meta_world(),
+        schedule::MermaidDirection::TopDown, schedule::MermaidLayout::CompactSets);
+    auto node = [&](std::string_view name, schedule::GraphNode::Type type) {
+        for (size_t i = 0; i < dag.node_count(); ++i)
+            if (dag.key(i).type == type &&
+                scheduler.meta_world().get_component<schedule::SysName>(dag.key(i).entity)->value == name)
+                return "n" + std::to_string(i);
+        return std::string{"missing"};
+    };
+    // These are declared dependencies, including the collective set completion.
+    for (const auto& edge : std::vector<std::pair<std::string,std::string>>{
+            {node("Input",schedule::GraphNode::System),node("Left",schedule::GraphNode::System)},
+            {node("Left",schedule::GraphNode::System),node("Right",schedule::GraphNode::System)},
+            {node("Frame",schedule::GraphNode::SetEnd),node("Output",schedule::GraphNode::System)}})
+        EXPECT_NE(compact.find(edge.first + " --> " + edge.second),std::string::npos);
+    EXPECT_EQ(compact.find("Frame [set start]"),std::string::npos);
+    EXPECT_NE(compact.find("Frame [set end]"),std::string::npos);
+    size_t arrows=0, pos=0;
+    while ((pos=compact.find(" --> ",pos))!=std::string::npos) { ++arrows; pos+=5; }
+    EXPECT_EQ(arrows,3u);
+    EXPECT_NE(compact.find("subgraph"),std::string::npos);
+}
+
 TEST(ScheduleMermaid, UnresolvedLabelsRemainVisibleAndExecuteAsEmptySlots) {
     Scheduler scheduler;
     int ran = 0;
